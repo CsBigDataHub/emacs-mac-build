@@ -1,14 +1,10 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
-
 # mac-build.sh
 # Build a macOS Emacs.app from source (mac-port style) with optional icon
-
 usage() {
     cat <<EOF
 Usage: $0 [options]
-
 Options:
   --src DIR           Emacs source directory (default: current directory)
   --app-dir DIR       Directory for --enable-mac-app (where Emacs.app will be created)
@@ -23,7 +19,6 @@ Options:
   --help              Show this help
 EOF
 }
-
 # Defaults
 SRC_DIR="$(pwd)"
 APP_DIR="$HOME/Documents/emacs-mac-build"
@@ -34,7 +29,6 @@ PREFIX=""
 DRY_RUN=0
 SIGN_IDENTITY="-"
 NO_SIGN=0
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --src)
@@ -84,7 +78,6 @@ while [[ $# -gt 0 ]]; do
         ;;
     esac
 done
-
 if [[ -z "$JOBS" ]]; then
     if command -v sysctl >/dev/null 2>&1; then
         JOBS=$(sysctl -n hw.ncpu)
@@ -92,14 +85,12 @@ if [[ -z "$JOBS" ]]; then
         JOBS=4
     fi
 fi
-
 echocmd() {
     echo "+ $*"
     if [[ $DRY_RUN -eq 0 ]]; then
         "$@"
     fi
 }
-
 convert_image_to_icns() {
     # $1 = input image (PNG/JPEG/etc)
     # $2 = output .icns file path
@@ -107,10 +98,8 @@ convert_image_to_icns() {
     local tmpdir
     tmpdir=$(mktemp -d)
     trap 'rm -rf "${tmpdir}"' RETURN
-
     local iconsetdir="$tmpdir/Emacs.iconset"
     mkdir -p "$iconsetdir"
-
     # Create required icon sizes (including @2x). Prefer ImageMagick (magick) if available, else sips.
     local sizes=(16 32 64 128 256 512)
     if command -v magick >/dev/null 2>&1 || command -v convert >/dev/null 2>&1; then
@@ -134,11 +123,9 @@ convert_image_to_icns() {
             sips -z "$sd" "$sd" "$input" --out "$iconsetdir/icon_${s}x${s}@2x.png" >/dev/null 2>&1 || cp "$input" "$iconsetdir/icon_${s}x${s}@2x.png"
         done
     fi
-
     # iconutil to create icns
     iconutil -c icns "$iconsetdir" -o "$output_icns"
 }
-
 echo "Starting mac build helper"
 echo "  Source dir: $SRC_DIR"
 echo "  App dir:    $APP_DIR"
@@ -146,28 +133,30 @@ echo "  App dir:    $APP_DIR"
 [[ -n "$ASSETS_PATH" ]] && echo "  Assets:     $ASSETS_PATH"
 echo "  Jobs:       $JOBS"
 [[ $NO_SIGN -eq 0 ]] && echo "  Codesign:   will sign with identity: $SIGN_IDENTITY" || echo "  Codesign:   skipped"
-
 cd "$SRC_DIR"
-
 # STEP 2: Bootstrap (autogen) and configure
 if [[ -f autogen.sh ]]; then
     echocmd ./autogen.sh
 else
     echocmd autoreconf -fvi
 fi
-
 # Prepare configure args
-CFLAGS="-O2 -mcpu=native -march=native -mtune=native -fomit-frame-pointer -DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT"
+# Detect architecture and set appropriate flags
+ARCH=$(uname -m)
+if [[ "$ARCH" == "arm64" ]]; then
+    CFLAGS="-O2 -mcpu=native -march=native -mtune=native -fomit-frame-pointer -DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT"
+else
+    # For x86_64, -mcpu is not valid
+    CFLAGS="-O2 -march=native -mtune=native -fomit-frame-pointer -DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT"
+fi
 CONFIGURE_OPTS=(--with-modules --with-native-compilation=aot --with-tree-sitter --enable-mac-self-contained --with-xwidgets --without-dbus --with-mac-metal)
 # Ensure we pass the app dir to enable-mac-app
 CONFIGURE_OPTS+=("--enable-mac-app=$APP_DIR")
 if [[ -n "$PREFIX" ]]; then
     CONFIGURE_OPTS+=("--prefix=$PREFIX")
 fi
-
 echo "Configuring Emacs (this may take a moment)"
 echocmd env CFLAGS="$CFLAGS" ./configure "${CONFIGURE_OPTS[@]}"
-
 # STEP 3: Build
 echo "Running make (bootstrap, then make and make install)"
 if echocmd make -j"$JOBS" bootstrap; then
@@ -176,7 +165,6 @@ else
     echo "Warning: bootstrap failed; continuing with normal build"
 fi
 echocmd make -j"$JOBS"
-
 # Use make install to install into app dir / prefix as configured
 if [[ -n "$PREFIX" ]]; then
     echo "Installing to prefix: $PREFIX"
@@ -185,7 +173,6 @@ else
     echo "Running 'make install' -- this will install the Mac App to $APP_DIR (if configured)."
     echocmd make install
 fi
-
 # STEP 4: Post-build packaging / wrapper
 EMACS_APP="${APP_DIR}/Emacs.app"
 if [[ ! -d "$EMACS_APP" ]]; then
@@ -198,14 +185,12 @@ if [[ ! -d "$EMACS_APP" ]]; then
         echo "Warning: Emacs.app not found at $EMACS_APP. Build may have failed or app path differs."
     fi
 fi
-
 if [[ -d "$EMACS_APP" ]]; then
     # STEP 5: Icon handling and Info.plist updates (use PlistBuddy commands found in repo)
     PLIST="$EMACS_APP/Contents/Info.plist"
     if [[ -n "$ICON_PATH" ]]; then
         RESOURCES_DIR="$EMACS_APP/Contents/Resources"
         echocmd mkdir -p "$RESOURCES_DIR"
-
         # If ICON_PATH is a URL, download it first
         tmp_download=""
         if [[ "$ICON_PATH" =~ ^https?:// ]]; then
@@ -220,7 +205,6 @@ if [[ -d "$EMACS_APP" ]]; then
         else
             ICON_SOURCE="$ICON_PATH"
         fi
-
         # If user provided a PNG/JPEG (or non-icns), convert to icns
         input_lower=$(echo "$ICON_SOURCE" | tr '[:upper:]' '[:lower:]')
         tmp_icns=""
@@ -232,49 +216,55 @@ if [[ -d "$EMACS_APP" ]]; then
         else
             ICON_TO_USE="$ICON_SOURCE"
         fi
-
         echo "Applying icon: copying $ICON_TO_USE -> $RESOURCES_DIR/Emacs.icns"
         echocmd cp "$ICON_TO_USE" "$RESOURCES_DIR/Emacs.icns"
-
-        # Remove Assets.car unless user explicitly provided one
-        if [[ -z "$ASSETS_PATH" ]]; then
-            echocmd rm -f "$RESOURCES_DIR/Assets.car" || true
-            # Delete CFBundleIconName (if present)
-            echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$PLIST" 2>/dev/null || true
-        else
-            # User provided Assets.car
-            echocmd cp "$ASSETS_PATH" "$RESOURCES_DIR/Assets.car"
-            # Set CFBundleIconName to Emacs (match expected name inside Assets.car)
-            echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$PLIST" 2>/dev/null || true
-            echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string Emacs" "$PLIST"
-        fi
-
-        # Set CFBundleIconFile, CFBundleIconName and CFBundleIcons to reference the icns (without extension).
-        # Remove existing keys then add a modern CFBundleIcons structure plus legacy entries.
+        # Clean up conflicting icon keys first
         echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconFile' "$PLIST" 2>/dev/null || true
         echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$PLIST" 2>/dev/null || true
         echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIcons' "$PLIST" 2>/dev/null || true
         echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconFiles' "$PLIST" 2>/dev/null || true
+        
+        # Remove Assets.car unless user explicitly provided one
+        if [[ -z "$ASSETS_PATH" ]]; then
+            echocmd rm -f "$RESOURCES_DIR/Assets.car" || true
+        else
+            # User provided Assets.car - copy it and use CFBundleIconName
+            echocmd cp "$ASSETS_PATH" "$RESOURCES_DIR/Assets.car"
+            echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string Emacs" "$PLIST"
+            # When using Assets.car, CFBundleIconName is primary, skip other icon keys
+            echo "Using Assets.car with CFBundleIconName"
+        fi
+        
+        # Set icon keys - these work whether Assets.car exists or not
+        # CFBundleIconFile points to the .icns file (without extension)
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Emacs" "$PLIST"
-        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string Emacs" "$PLIST"
-        # Add CFBundleIcons->CFBundlePrimaryIcon->CFBundleIconFiles array with Emacs
-        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$PLIST"
-        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$PLIST"
-        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$PLIST"
-        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string Emacs" "$PLIST"
-        # Also add legacy CFBundleIconFiles array to help older tooling
-        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconFiles array" "$PLIST"
-        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconFiles:0 string Emacs" "$PLIST"
-
-        # Also touch app to refresh Finder/LaunchServices cache and force a registration
+        
+        # Modern CFBundleIcons dictionary structure (macOS 10.13+)
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$PLIST" 2>/dev/null || true
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$PLIST" 2>/dev/null || true
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$PLIST" 2>/dev/null || true
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string Emacs" "$PLIST" 2>/dev/null || true
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName string Emacs" "$PLIST" 2>/dev/null || true
+        # Touch the app bundle to update modification time
         echocmd touch "$EMACS_APP"
-        # Force LaunchServices to re-register the app (helps Finder pick up the new icon)
+        echocmd touch "$EMACS_APP/Contents"
+        echocmd touch "$EMACS_APP/Contents/Info.plist"
+        
+        echo "Icon applied successfully to $RESOURCES_DIR/Emacs.icns"
+        echo ""
+        echo "To ensure the icon displays immediately, run these commands:"
+        echo "  touch \"$EMACS_APP\""
+        echo "  killall Finder"
+        echo "  killall Dock"
+        echo ""
+        echo "Or register the app with LaunchServices:"
         LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
         if [[ -x "$LSREG" ]]; then
             echocmd "$LSREG" -f "$EMACS_APP"
+            echo "  $LSREG -f \"$EMACS_APP\""
         fi
-        echo "Icon applied. If the Finder still shows the old icon, try: \n  killall Finder\nor log out/in."
-
+        echo ""
+        echo "If the icon still doesn't appear, log out and back in."
         # Cleanup temporary files
         if [[ -n "${tmp_icns:-}" && -f "${tmp_icns:-}" ]]; then
             rm -f "${tmp_icns}" || true
@@ -283,7 +273,6 @@ if [[ -d "$EMACS_APP" ]]; then
             rm -f "${tmp_download}" || true
         fi
     fi
-
     # Optionally inject protected resources usage descriptions found in EmacsBase.rb
     # (Camera/Microphone/Speech). These can be useful for sandboxed builds.
     echo "Ensuring protected resources usage descriptions exist in Info.plist"
@@ -293,82 +282,66 @@ if [[ -d "$EMACS_APP" ]]; then
         echocmd /usr/libexec/PlistBuddy -c "Add NSMicrophoneUsageDescription string Emacs requires permission to access the Microphone." "$PLIST"
     /usr/libexec/PlistBuddy -c "Print NSSpeechRecognitionUsageDescription" "$PLIST" >/dev/null 2>&1 ||
         echocmd /usr/libexec/PlistBuddy -c "Add NSSpeechRecognitionUsageDescription string Emacs requires permission to handle any speech recognition." "$PLIST"
-
     # Verify the bundle format and contents before signing
     echo "Verifying bundle format and contents"
-    if [[ -d "$EMACS_APP" ]]; then
-        # Check if Contents/Resources directory contains necessary files
-        RESOURCES_DIR="$EMACS_APP/Contents/Resources"
-        if [[ -d "$RESOURCES_DIR" ]]; then
-            if [[ -f "$RESOURCES_DIR/Emacs.icns" ]]; then
-                echo "Resources directory contains necessary files"
-            else
-                echo "Error: Resources directory is missing Emacs.icns"
-                exit 1
-            fi
-        else
-            echo "Error: Resources directory not found"
-            exit 1
-        fi
-
-        # Check if Contents/MacOS directory contains necessary files
-        MACOS_DIR="$EMACS_APP/Contents/MacOS"
-        if [[ -d "$MACOS_DIR" ]]; then
-            if [[ -f "$MACOS_DIR/Emacs" ]]; then
-                echo "MacOS directory contains necessary files"
-            else
-                echo "Error: MacOS directory is missing Emacs"
-                exit 1
-            fi
-        else
-            echo "Error: MacOS directory not found"
-            exit 1
-        fi
-
-        # Check if Contents/Info.plist exists
-        PLIST_FILE="$EMACS_APP/Contents/Info.plist"
-        if [[ -f "$PLIST_FILE" ]]; then
-            echo "Info.plist file exists"
-        else
-            echo "Error: Info.plist file not found"
-            exit 1
-        fi
-
-        if /usr/bin/codesign --verify --deep --strict --verbose=2 "$EMACS_APP"; then
-            echo "Bundle format and contents are valid"
-        else
-            echo "Error: Bundle format or contents are invalid"
-            exit 1
-        fi
-    else
-        echo "Error: Emacs.app not found"
+    # Check if Contents/Resources directory contains necessary files
+    RESOURCES_DIR="$EMACS_APP/Contents/Resources"
+    if [[ ! -d "$RESOURCES_DIR" ]]; then
+        echo "Error: Resources directory not found"
         exit 1
     fi
-
+    
+    if [[ ! -f "$RESOURCES_DIR/Emacs.icns" ]]; then
+        echo "Warning: Resources directory is missing Emacs.icns (may use default icon)"
+    else
+        echo "Resources directory contains necessary files"
+    fi
+    
+    # Check if Contents/MacOS directory contains necessary files
+    MACOS_DIR="$EMACS_APP/Contents/MacOS"
+    if [[ ! -d "$MACOS_DIR" ]]; then
+        echo "Error: MacOS directory not found"
+        exit 1
+    fi
+    
+    if [[ ! -f "$MACOS_DIR/Emacs" ]]; then
+        echo "Error: MacOS directory is missing Emacs executable"
+        exit 1
+    else
+        echo "MacOS directory contains necessary files"
+    fi
+    
+    # Check if Contents/Info.plist exists
+    PLIST_FILE="$EMACS_APP/Contents/Info.plist"
+    if [[ ! -f "$PLIST_FILE" ]]; then
+        echo "Error: Info.plist file not found"
+        exit 1
+    else
+        echo "Info.plist file exists"
+    fi
+    
     # Codesign (self-sign / ad-hoc by default) if requested
     if [[ $NO_SIGN -eq 0 ]]; then
         echo "Signing app: $EMACS_APP (identity: $SIGN_IDENTITY)"
         # Use the same simple re-sign approach used by the repo's post_install (ad-hoc by default)
         echocmd /usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" "$EMACS_APP"
-        echocmd /usr/bin/codesign --verify --deep --strict --verbose=2 "$EMACS_APP" || true
+        
+        if /usr/bin/codesign --verify --deep --strict --verbose=2 "$EMACS_APP"; then
+            echo "Code signing verification successful"
+        else
+            echo "Warning: Code signing verification failed"
+        fi
     else
         echo "Skipping codesign as requested"
     fi
-
+    
     # Remove quarantine attribute so the built app can be launched locally without Gatekeeper prompts
     if command -v xattr >/dev/null 2>&1; then
         echocmd /usr/bin/xattr -dr com.apple.quarantine "$EMACS_APP" || true
-fi
+    fi
 else
-    echo "Error: Emacs.app not found"
+    echo "Error: Emacs.app not found at $EMACS_APP"
     exit 1
 fi
-    fi
-
-else
-    echo "Emacs.app not found; skipping wrapper/icon steps"
-fi
-
 echo "mac build helper complete"
-
 # End of file
