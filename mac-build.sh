@@ -323,33 +323,10 @@ if [[ -d "$EMACS_APP" ]]; then
     # Codesign (self-sign / ad-hoc by default) if requested
     if [[ $NO_SIGN -eq 0 ]]; then
         echo "Signing app: $EMACS_APP (identity: $SIGN_IDENTITY)"
+        # Use --deep but not --strict to handle complex bundle structures
+        echocmd /usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" "$EMACS_APP"
         
-        # Sign all dylibs, executables, and nested bundles first (bottom-up)
-        echo "Signing individual binaries and libraries..."
-        
-        # Sign all .dylib files
-        find "$EMACS_APP" -type f -name "*.dylib" -print0 2>/dev/null | while IFS= read -r -d '' lib; do
-            echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$lib" 2>/dev/null || true
-        done
-        
-        # Sign all executables in MacOS and libexec directories
-        find "$EMACS_APP/Contents/MacOS" "$EMACS_APP/Contents/libexec" -type f -perm +111 -print0 2>/dev/null | while IFS= read -r -d '' exe; do
-            # Skip if it's a script
-            if file "$exe" | grep -q "Mach-O"; then
-                echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$exe" 2>/dev/null || true
-            fi
-        done
-        
-        # Sign any frameworks
-        find "$EMACS_APP/Contents/Frameworks" -type d -name "*.framework" 2>/dev/null | while IFS= read -r framework; do
-            echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$framework" 2>/dev/null || true
-        done
-        
-        # Finally sign the main app bundle (without --deep, as we've already signed everything)
-        echo "Signing main app bundle..."
-        echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$EMACS_APP"
-        
-        # Verify the signature
+        # Verify without --strict
         echo "Verifying code signature..."
         if /usr/bin/codesign --verify --verbose=2 "$EMACS_APP" 2>&1; then
             echo "Code signing verification successful"
