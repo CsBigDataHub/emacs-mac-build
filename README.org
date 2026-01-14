@@ -1,177 +1,317 @@
-#+title: *mac-build.sh* — build script for macOS Emacs.app (Emacs 30)
+#+TITLE: *mac-build.sh* — Build Script for macOS Emacs.app (Emacs 30)
 
-This document describes the mac-build.sh helper in this directory. It is
-intended for local builds of Emacs.app (targeting Emacs 30.x) on macOS.
-
-* Contents
-** Synopsis
-** Requirements
-** Usage
-** Options
-** Examples
-** Icon handling
-** Signing and Gatekeeper (xattr)
-** Notes, troubleshooting and tips
-** License
+This document describes the =mac-build.sh= helper script. It is intended for local builds of Emacs.app (targeting Emacs 30.x) on macOS, including Apple Silicon (M1/M2/M3/M4) and Intel processors.
 
 * Synopsis
 
 The script automates the typical mac-port style build steps:
 
-- Run autogen.sh / autoreconf
-- Run ./configure with mac options and --enable-mac-app
-- make bootstrap, make, make install
-- Post-build: create a wrapper (Emacs -> Emacs-real) that injects PATH
-- Optionally install an icon into the app bundle (supporting local paths and HTTP(s) URLs)
-- Convert PNG/JPEG to .icns (ImageMagick preferred, falls back to sips + iconutil)
-- Self-sign the built app (ad-hoc by default) and remove the quarantine attribute so the app can be launched locally
+- Run =autogen.sh= / =autoreconf=
+- Run =./configure= with mac options and =--enable-mac-app=
+- Execute =make bootstrap=, =make=, =make install=
+- Post-build icon installation and Info.plist configuration
+- Code sign the built app (individual binaries then main bundle)
+- Remove quarantine attribute for local launching
+- Register app with LaunchServices
 
 * Requirements
 
 The following tools are required or recommended on the build machine:
 
-- Xcode command line tools (clang, xcrun, make)
-- autoconf / automake / autoreconf (if autogen.sh is not present)
-- iconutil (macOS builtin)
-- sips (macOS builtin)
-- ImageMagick (optional, preferred for icon resizing; script accepts magick/convert)
-- curl or wget (for downloading remote icons)
-- codesign (builtin)
-- xattr (builtin)
+** Required
+- Xcode Command Line Tools (=clang=, =xcrun=, =make=)
+- =autoconf= / =automake= / =autoreconf= (if =autogen.sh= is not present)
+- =iconutil= (macOS built-in)
+- =sips= (macOS built-in)
+- =codesign= (macOS built-in)
+- =xattr= (macOS built-in)
+
+** Optional (Recommended)
+- ImageMagick (=magick= or =convert= command) — better icon quality than =sips=
+  - Install via: =brew install imagemagick=
+- =curl= or =wget= — for downloading remote icons (=curl= is built-in on macOS)
 
 * Usage
 
-Run the script from anywhere. Example:
+Run the script from anywhere:
 
 #+BEGIN_SRC bash
-./mac-build-script/mac-build.sh --src /path/to/emacs-30.2 \
-  --app-dir /Users/ckoneru/Documents/emacs-mac-build \
+./mac-build.sh --src /path/to/emacs-30.2 \
+  --app-dir ~/Documents/emacs-mac-build \
   --icon /path/to/icon.png \
   --jobs 8
 #+END_SRC
 
-After a successful build, the script will place Emacs.app in the directory
-passed to --app-dir (or the default $HOME/Documents/emacs-mac-build). The
-script will attempt to sign the bundle (ad-hoc by default) and remove the
-com.apple.quarantine attribute so you can launch it locally without Gatekeeper
-blocking.
+After a successful build, =Emacs.app= will be placed in the directory specified by =--app-dir= (default: =$HOME/Documents/emacs-mac-build=).
+
+The script will sign the bundle (ad-hoc by default) and remove the =com.apple.quarantine= attribute so you can launch it locally without Gatekeeper warnings.
 
 * Options
 
-- --src DIR
+- =--src DIR=
+
   Emacs source directory (default: current directory)
 
-- --app-dir DIR
-  Directory passed to configure --enable-mac-app (default: $HOME/Documents/emacs-mac-build)
+- =--app-dir DIR=
 
-- --prefix DIR
-  Optional configure --prefix for installation
+  Directory for =--enable-mac-app= where =Emacs.app= will be created
 
-- --icon PATH_OR_URL
-  Path to an icon file (PNG/JPEG/ICNS) or an HTTP(S) URL. PNG/JPEG will be
-  converted to ICNS automatically. Local paths and http(s) URLs are supported.
+  Default: =$HOME/Documents/emacs-mac-build=
 
-- --assets PATH
-  Optional Assets.car to install into the app bundle (macOS Tahoe / 26+)
+- =--prefix DIR=
 
-- --jobs N
-  Number of parallel make jobs (default: CPU count)
+  Optional install prefix for =configure --prefix=
 
-- --sign-identity ID
-  Codesign identity. Default is ad-hoc "-" which is suitable for local testing.
-  Provide a Developer ID identity name to sign with a real certificate.
+- =--icon PATH_OR_URL=
 
-- --no-sign
-  Skip codesign step entirely.
+  Path to an icon file (PNG/JPEG/ICNS) or an HTTP(S) URL
 
-- --dry-run
-  Print the actions the script would run without executing them.
+  PNG/JPEG will be converted to ICNS automatically
 
-- --help
-  Show help text.
+- =--assets PATH=
+
+  Optional =Assets.car= file to install into the app bundle (macOS 13+)
+
+- =--jobs N=
+
+  Number of parallel make jobs (default: CPU count via =sysctl -n hw.ncpu=)
+
+- =--sign-identity ID=
+
+  Codesign identity (default: ad-hoc ="-"= for local testing)
+
+  Provide a Developer ID identity name to sign with a real certificate
+
+- =--no-sign=
+
+  Skip codesign step entirely
+
+- =--dry-run=
+
+  Print actions without executing them
+
+- =--help=
+
+  Show help text
 
 * Examples
 
-Build from local source and convert a local PNG icon to ICNS, sign ad-hoc:
+** Build with local PNG icon and ad-hoc signing
 
 #+BEGIN_SRC bash
-  ./mac-port-script/mac-build.sh \
-    --src ~/src/emacs-30.2 \
-    --app-dir ~/Documents/emacs-mac-build \
-    --icon ~/Pictures/emacs-icon.png \
-    --jobs 8
+./mac-build.sh \
+  --src ~/src/emacs-30.2 \
+  --app-dir ~/Documents/emacs-mac-build \
+  --icon ~/Pictures/emacs-icon.png \
+  --jobs 8
 #+END_SRC
 
-Build using a remote ICNS icon and skip signing:
+** Build with remote ICNS icon, skip signing
 
 #+BEGIN_SRC bash
-./mac-port-script/mac-build.sh \
+./mac-build.sh \
   --src ~/src/emacs-30.2 \
   --app-dir ~/Documents/emacs-mac-build \
   --icon https://example.com/emacs.icns \
   --no-sign
 #+END_SRC
 
-Build using a remote PNG icon and sign with a local Developer ID identity:
+** Build with remote PNG and Developer ID certificate
 
 #+BEGIN_SRC bash
-./mac-port-script/mac-build.sh \
+./mac-build.sh \
   --src ~/src/emacs-30.2 \
   --app-dir ~/Documents/emacs-mac-build \
   --icon https://example.com/emacs.png \
   --sign-identity "Developer ID Application: Your Name (TEAMID)"
 #+END_SRC
 
-* Icon handling
+** Quick build on Apple Silicon M1 Max
 
-- If the value passed to --icon is an HTTP(S) URL the script downloads the
-  icon (curl preferred, falls back to wget). The downloaded file is used as the
-  source for conversion or installation.
+#+BEGIN_SRC bash
+./mac-build.sh \
+  --src ~/src/emacs \
+  --icon https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/icons/emacs-icon-modern.png
+#+END_SRC
 
-- If the source file is PNG/JPEG the script converts it into an .icns bundle
-  using ImageMagick (magick/convert) if available, otherwise sips + iconutil.
-  The resulting file is installed to
-  Emacs.app/Contents/Resources/Emacs.icns and Info.plist is updated with
-  CFBundleIconFile = "Emacs". If you provide an Assets.car file the script
-  installs that too and sets CFBundleIconName.
+The script automatically detects your M1 Max and uses optimized ARM64 build flags.
 
-* Signing and Gatekeeper (xattr)
+* Icon Handling
 
-- The script signs the built app with codesign. By default the script uses an
-  ad-hoc signature ("-") which is suitable for local testing. Use
-  --sign-identity to provide a real identity.
+** Download Support
+If the value passed to =--icon= is an HTTP(S) URL, the script downloads it using =curl= (preferred) or =wget=. The downloaded file is then used for conversion or installation.
 
-- After signing (or if you skip signing), the script removes the
-  com.apple.quarantine attribute from the app bundle using xattr so the app can
-  be launched directly from Finder without Gatekeeper prompts:
+** Automatic Conversion
+If the source file is PNG or JPEG, the script converts it to ICNS format:
+- Uses ImageMagick (=magick= / =convert=) if available (better quality)
+- Falls back to =sips= + =iconutil= if ImageMagick is not installed
+
+** Installation
+The resulting icon is installed to:
+#+BEGIN_EXAMPLE
+Emacs.app/Contents/Resources/Emacs.icns
+#+END_EXAMPLE
+
+The script updates =Info.plist= with:
+- =CFBundleIconFile = "Emacs"=
+- =CFBundleIcons= dictionary structure
+- Removes =Assets.car= unless explicitly provided via =--assets=
+
+** Assets.car Support
+If you provide an =Assets.car= file via =--assets=, the script:
+- Copies it to =Contents/Resources/Assets.car=
+- Sets =CFBundleIconName= to ="Emacs"=
+- Keeps both =Assets.car= and =Emacs.icns= in the bundle
+
+** Icon Refresh
+After icon installation, the script:
+1. Touches the app bundle to update modification time
+2. Runs =lsregister= to force LaunchServices to recognize the new icon
+3. Provides instructions for manual refresh if needed:
+
+#+BEGIN_SRC bash
+killall Finder
+killall Dock
+#+END_SRC
+
+* Signing and Gatekeeper
+
+** Code Signing Strategy
+The script uses a bottom-up signing approach (not =--deep=) because Emacs has a complex bundle structure with symlinks:
+
+1. Sign all =.dylib= and =.so= files
+2. Sign all Mach-O executables in =MacOS/= and =libexec/=
+3. Sign any frameworks
+4. Sign the main app bundle last
+
+This avoids "bundle format unrecognized" errors that occur with =codesign --deep=.
+
+** Ad-hoc Signing (Default)
+By default, the script uses ad-hoc signing (=-=) which is suitable for local testing:
+
+#+BEGIN_SRC bash
+codesign --force --sign "-" Emacs.app
+#+END_SRC
+
+** Developer ID Signing
+For distribution, provide a real certificate:
+
+#+BEGIN_SRC bash
+./mac-build.sh --sign-identity "Developer ID Application: Your Name (TEAM123)"
+#+END_SRC
+
+** Quarantine Removal
+After signing, the script removes the quarantine attribute:
 
 #+BEGIN_SRC bash
 xattr -dr com.apple.quarantine /path/to/Emacs.app
 #+END_SRC
 
-- For distributed builds you will need a Developer ID certificate and should
-  also notarize the build for Gatekeeper compatibility on other machines.
+This allows the app to be launched directly from Finder without Gatekeeper warnings.
 
-* Notes, troubleshooting and tips
+** Distribution Notes
+For distributed builds intended for other users:
+- You need a valid Developer ID certificate
+- You should notarize the build with Apple for full Gatekeeper compatibility
+- The script does not handle notarization (must be done separately)
 
-- The script intentionally does not patch configure.ac. It targets Emacs 30
-  and expects you to use the source as-is.
+* Apple Silicon Support
 
-- If you encounter "library not loaded" errors after upgrading dependencies,
-  try reinstalling or rebuilding. Native-compilation (libgccjit) requires
-  libgccjit/gcc to be available when building.
+The script fully supports Apple Silicon (M1/M2/M3/M4) processors:
 
-- Image quality: ImageMagick generally produces better icon quality than sips
-  so install ImageMagick if you can.
+** Automatic Architecture Detection
+The script detects your CPU architecture and sets appropriate compiler flags:
 
-- If the downloaded icon is not an image or download fails, the script will
-  exit; re-run with a local path to the correct file.
+- *Apple Silicon (arm64)*: Uses =CFLAGS= with =-mcpu=native -march=native -mtune=native=
+- *Intel (x86_64)*: Uses =CFLAGS= with =-march=native -mtune=native= (excludes =-mcpu=)
 
-- The script creates a wrapper that renames the built Emacs binary to
-  Emacs-real and places a small shell wrapper at Emacs that injects PATH. The
-  wrapper respects the EMACS_PLUS_NO_PATH_INJECTION environment variable.
+** Optimized Build Flags
+The script uses these optimization flags for both architectures:
+
+#+BEGIN_SRC bash
+-O2                        # Optimization level 2
+-march=native -mtune=native # CPU-specific optimizations
+-fomit-frame-pointer       # Performance optimization
+-DFD_SETSIZE=10000         # Increase file descriptor limit
+-DDARWIN_UNLIMITED_SELECT  # Remove select() limitations
+#+END_SRC
+
+** Native Compilation
+The script enables:
+- =--with-native-compilation=aot= — Ahead-of-time native compilation for faster Emacs Lisp
+- =--with-mac-metal= — Apple Metal GPU acceleration
+- =--with-tree-sitter= — Modern syntax parsing
+
+** Parallel Compilation
+The script automatically detects your CPU core count:
+
+#+BEGIN_SRC bash
+JOBS=$(sysctl -n hw.ncpu)
+#+END_SRC
+
+On an M1 Max (10 cores), this results in fast parallel compilation.
+
+* Notes and Troubleshooting
+
+** General Notes
+- The script targets Emacs 30.x and does not patch =configure.ac=
+- Uses source as-is from the repository
+- Creates =Emacs.app= in the specified =--app-dir= directory
+
+** Common Issues
+
+*** "Library not loaded" errors
+If you encounter missing library errors after upgrading dependencies:
+- Rebuild Emacs from scratch
+- Reinstall dependencies via Homebrew
+- Native compilation requires =libgccjit= / =gcc= to be available during build
+
+*** Icon not appearing
+If the Finder still shows the old icon after building:
+
+#+BEGIN_SRC bash
+# Method 1: Refresh Finder and Dock
+killall Finder
+killall Dock
+
+# Method 2: Re-register with LaunchServices
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f ~/Documents/emacs-mac-build/Emacs.app
+
+# Method 3: Log out and back in
+#+END_SRC
+
+*** Code signing fails
+If you see "bundle format unrecognized, invalid, or unsuitable":
+- This is fixed in the current version (no longer uses =--deep=)
+- The script now signs individual binaries then the main bundle
+- Try running with =--no-sign= if signing continues to fail
+
+*** ImageMagick icon quality
+ImageMagick produces better icon quality than =sips=:
+
+#+BEGIN_SRC bash
+brew install imagemagick
+#+END_SRC
+
+** Performance Tips
+- Use =--jobs= matching your CPU core count for fastest builds
+- On Apple Silicon, native compilation is very fast
+- Consider building with =--dry-run= first to verify your configuration
+
+** Build Flags Reference
+The script configures Emacs with these flags:
+
+#+BEGIN_SRC bash
+--with-modules                # Dynamic module support
+--with-native-compilation=aot # Ahead-of-time native compilation
+--with-tree-sitter            # Tree-sitter parsing
+--enable-mac-self-contained   # Self-contained app bundle
+--with-xwidgets               # Embedded web browser support
+--without-dbus                # No D-Bus on macOS
+--with-mac-metal              # Metal GPU acceleration
+--enable-mac-app=$APP_DIR     # macOS app bundle creation
+#+END_SRC
 
 * License
 
-This README and the script are provided under the same license as the
-repository. Copy and adapt as you need.
+This README and the script are provided under the same license as the repository. Copy and adapt as needed.
