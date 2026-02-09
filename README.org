@@ -312,6 +312,82 @@ The script configures Emacs with these flags:
 --enable-mac-app=$APP_DIR     # macOS app bundle creation
 #+END_SRC
 
+* Emacs Client.app (emacsclient wrapper)
+
+New in the staged build: the script can optionally create a small AppleScript-based application bundle named "Emacs Client.app" that wraps the installed =emacsclient= binary. Use the =--build-client-app= flag to enable this behavior.
+
+- Location: =<app-dir>/Emacs Client.app= (for example =~/Documents/emacs-mac-build/Emacs Client.app=)
+- Creation: an =emacs-client.applescript= file is generated in the source directory and compiled with =osacompile= into the above location.
+
+Functionality:
+
+- Handles files opened from Finder and drag-and-drop by launching =emacsclient -c -a '' -n <file>=
+- Handles launch without files (Spotlight/Dock) by calling =emacsclient -c -a '' -n=
+- Handles =org-protocol://= URLs by calling =emacsclient -n "<url>"=
+- Attempts to open the full Emacs.app with =open -a Emacs= after invoking emacsclient
+
+Icon and plist behavior:
+
+- The client app uses the same icon as Emacs.app when available. The script copies =Emacs.icns= from =Emacs.app/Contents/Resources= into the client bundle as =applet.icns=.
+- If an =Assets.car= file is present (or provided via =--assets=), it is copied into the client bundle and the plist key =CFBundleIconName= is set appropriately.
+- The script updates =Info.plist= keys for the client bundle (bundle identifier, name, version, document types, URL types) and sets both =CFBundleIconFile= and the modern =CFBundleIcons/CFBundlePrimaryIcon/CFBundleIconFiles= entries to improve Finder reliability.
+- After creating the client bundle the script touches the bundle and calls LaunchServices' =lsregister -f= to help Finder pick up the new icon and metadata.
+
+Notes:
+
+- If you do not pass a custom =--icon=, the client will use whatever icon is present in the built Emacs.app (or the system default if none is present).
+- The client wrapper expects a working =emacsclient= binary at the provided prefix (the script attempts to derive a suitable prefix from the built Emacs.app if none is provided).
+
+** Changing the Emacsclient Path after Moving to /Applications
+
+If you move both =Emacs.app= and =Emacs Client.app= to =/Applications= after building,
+you may need to update the emacsclient path in the wrapper bundle, since the script hardcodes
+this path at build time.
+
+To fix this:
+
+1. Extract or locate =emacs-client.applescript=. If you do not have the original, you can extract the AppleScript source from the compiled .app with:
+
+   #+BEGIN_SRC bash
+   strings "/Applications/Emacs Client.app/Contents/Resources/Scripts/main.scpt" > emacs-client.applescript
+   #+END_SRC
+
+2. Edit =emacs-client.applescript= and update every instance of the emacsclient path to =/Applications/Emacs.app/Contents/MacOS/bin/emacsclient= (or =/Applications/Emacs.app/Contents/MacOS/emacsclient= if that is the location in your build).
+
+3. Recompile the AppleScript into an application bundle:
+
+   #+BEGIN_SRC bash
+   osacompile -o "/Applications/Emacs Client.app" emacs-client.applescript
+   #+END_SRC
+
+4. Optionally refresh the icon in Finder:
+
+   #+BEGIN_SRC bash
+   touch "/Applications/Emacs Client.app"
+   killall Finder
+   killall Dock
+   #+END_SRC
+
+After this, =Emacs Client.app= will invoke the correct =emacsclient= location in =/Applications=.
+
+** Graphical Way: Using Script Editor.app to Change emacsclient Path Directly
+
+You can also update the =emacsclient= path in the wrapper using Script Editor (no need for Terminal commands):
+
+1. Open Finder, navigate to your client app (e.g.,
+   =/Applications/Emacs Client.app/Contents/Resources/Scripts/main.scpt=),
+   and double-click it—or open it explicitly in Script Editor.app.
+
+2. In Script Editor, look for all lines that contain the old =emacsclient= path.
+   Edit these to use the new path (e.g.,
+   =/Applications/Emacs.app/Contents/MacOS/bin/emacsclient=).
+
+3. Save the document. You may be prompted for permissions.
+
+4. That’s it! Next launch of Emacs Client.app will use your updated path.
+
+This is the easiest and quickest way to update the client if you’re comfortable with the GUI. The code will remain compiled as =.scpt= and will work immediately.
+
 * License
 
 This README and the script are provided under the same license as the repository. Copy and adapt as needed.
