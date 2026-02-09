@@ -12,6 +12,7 @@ Options:
   --prefix DIR        Optional install prefix for configure --prefix
   --icon PATH         Path to an icon file (PNG or ICNS). PNG will be converted to ICNS.
   --assets PATH       Path to Assets.car file to apply (Tahoe macOS 26+)
+  --build-client-app  Build "Emacs Client.app" wrapper for emacsclient
   --jobs N            Number of parallel make jobs (default: cpu count)
   --sign-identity ID  Codesign identity (default: ad-hoc '-'). Use --no-sign to skip signing.
   --no-sign           Do not run codesign after build
@@ -24,6 +25,7 @@ SRC_DIR="$(pwd)"
 APP_DIR="$HOME/Documents/emacs-mac-build"
 ICON_PATH=""
 ASSETS_PATH=""
+BUILD_CLIENT_APP=0
 JOBS=""
 PREFIX=""
 DRY_RUN=0
@@ -46,6 +48,10 @@ while [[ $# -gt 0 ]]; do
     --assets)
         ASSETS_PATH="$2"
         shift 2
+        ;;
+    --build-client-app)
+        BUILD_CLIENT_APP=1
+        shift
         ;;
     --jobs)
         JOBS="$2"
@@ -91,6 +97,160 @@ echocmd() {
         "$@"
     fi
 }
+
+escape_for_applescript_shell() {
+    # Escape a string for safe insertion into an AppleScript: do shell script "..." command.
+    # We primarily need to escape single quotes because we'll wrap PATH in single quotes.
+    local s="$1"
+    s=${s//"'"/"'\\''"}
+    printf '%s' "$s"
+}
+
+create_emacs_client_app() {
+    # Creates "Emacs Client.app" using osacompile and patches its Info.plist.
+    # Uses the emacsclient installed alongside the built Emacs.
+    local icons_dir="$1"   # directory containing Emacs.icns (and optional Assets.car)
+    local version="$2"
+    local prefix="$3"
+    local output_dir="$4"  # directory where Emacs Client.app should be created
+
+    echo "Creating Emacs Client.app"
+
+    local escaped_path
+    escaped_path=$(escape_for_applescript_shell "${PATH}")
+
+    local buildpath="$SRC_DIR"
+    local client_script="$buildpath/emacs-client.applescript"
+
+    cat >"$client_script" <<EOF
+-- Emacs Client AppleScript Application
+-- Handles opening files from Finder, drag-and-drop, and launching from Spotlight/Dock
+
+on open theDropped
+  repeat with oneDrop in theDropped
+    set dropPath to quoted form of POSIX path of oneDrop
+    try
+      do shell script "PATH='${escaped_path}' ${prefix}/bin/emacsclient -c -a '' -n " & dropPath
+    end try
+  end repeat
+  try
+    do shell script "open -a Emacs"
+  end try
+end open
+
+-- Handle launch without files (from Spotlight, Dock, or Finder)
+on run
+  try
+    do shell script "PATH='${escaped_path}' ${prefix}/bin/emacsclient -c -a '' -n"
+  end try
+  try
+    do shell script "open -a Emacs"
+  end try
+end run
+
+-- Handle org-protocol:// URLs (for org-capture, org-roam, etc.)
+on open location this_URL
+  try
+    do shell script "PATH='${escaped_path}' ${prefix}/bin/emacsclient -n " & quoted form of this_URL
+  end try
+  try
+    do shell script "open -a Emacs"
+  end try
+end open location
+EOF
+
+    local client_app_dir="$output_dir/Emacs Client.app"
+    echocmd mkdir -p "$output_dir"
+    echocmd rm -rf "$client_app_dir" || true
+    echocmd /usr/bin/osacompile -o "$client_app_dir" "$client_script"
+
+    local client_plist="$client_app_dir/Contents/Info.plist"
+
+    # Basic metadata
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier org.gnu.EmacsClient" "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string org.gnu.EmacsClient" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleName Emacs\ Client" "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleName string Emacs Client" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Emacs\ Client" "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Emacs Client" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleGetInfoString Emacs\ Client\ ${version}" "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleGetInfoString string Emacs Client ${version}" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${version}" "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${version}" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${version}" "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string ${version}" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Set :LSApplicationCategoryType public.app-category.productivity" "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.productivity" "$client_plist"
+
+    local year
+    year=$(date +%Y)
+    echocmd /usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright Copyright\ \\U00A9\ 1989-${year}\ Free\ Software\ Foundation,\ Inc." "$client_plist" 2>/dev/null || \
+        echocmd /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string Copyright \\U00A9 1989-${year} Free Software Foundation, Inc." "$client_plist"
+
+    # Document types
+    echocmd /usr/libexec/PlistBuddy -c "Delete :CFBundleDocumentTypes" "$client_plist" 2>/dev/null || true
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes array" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0 dict" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeRole string Editor" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:CFBundleTypeName string Text\ Document" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes array" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:0 string public.text" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:1 string public.plain-text" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:2 string public.source-code" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:3 string public.script" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:4 string public.shell-script" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDocumentTypes:0:LSItemContentTypes:5 string public.data" "$client_plist"
+
+    # org-protocol URL scheme
+    echocmd /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "$client_plist" 2>/dev/null || true
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes array" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0 dict" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLName string Org\ Protocol" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes array" "$client_plist"
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string org-protocol" "$client_plist"
+
+    # Icon handling
+    local client_resources_dir="$client_app_dir/Contents/Resources"
+    echocmd mkdir -p "$client_resources_dir"
+
+    if [[ -f "$icons_dir/Emacs.icns" ]]; then
+        echocmd cp "$icons_dir/Emacs.icns" "$client_resources_dir/applet.icns"
+    fi
+
+    # Remove droplet defaults
+    echocmd rm -f "$client_resources_dir/droplet.icns" "$client_resources_dir/droplet.rsrc" || true
+
+    # Tahoe: prefer Assets.car if present; otherwise ensure it's removed so .icns is used
+    if [[ -f "$icons_dir/Assets.car" ]]; then
+        echocmd cp "$icons_dir/Assets.car" "$client_resources_dir/Assets.car"
+        echocmd /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$client_plist" 2>/dev/null || true
+        echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string Emacs" "$client_plist"
+    else
+        echocmd rm -f "$client_resources_dir/Assets.car" || true
+    fi
+
+    echocmd /usr/libexec/PlistBuddy -c "Delete :CFBundleIconFile" "$client_plist" 2>/dev/null || true
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string applet" "$client_plist"
+
+    # Also set modern icon dictionaries for better Finder reliability
+    echocmd /usr/libexec/PlistBuddy -c "Delete :CFBundleIcons" "$client_plist" 2>/dev/null || true
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$client_plist" 2>/dev/null || true
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$client_plist" 2>/dev/null || true
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$client_plist" 2>/dev/null || true
+    echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string applet" "$client_plist" 2>/dev/null || true
+
+    # Touch bundle and register with LaunchServices so Finder updates the icon
+    echocmd touch "$client_app_dir" || true
+    echocmd touch "$client_app_dir/Contents" || true
+    echocmd touch "$client_plist" || true
+
+    local LSREG
+    LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+    if [[ -x "$LSREG" ]]; then
+        echocmd "$LSREG" -f "$client_app_dir" || true
+    fi
+}
+
 convert_image_to_icns() {
     # $1 = input image (PNG/JPEG/etc)
     # $2 = output .icns file path
@@ -168,11 +328,10 @@ echocmd make -j"$JOBS"
 # Use make install to install into app dir / prefix as configured
 if [[ -n "$PREFIX" ]]; then
     echo "Installing to prefix: $PREFIX"
-    echocmd make install
 else
     echo "Running 'make install' -- this will install the Mac App to $APP_DIR (if configured)."
-    echocmd make install
 fi
+echocmd make install
 # STEP 4: Post-build packaging / wrapper
 EMACS_APP="${APP_DIR}/Emacs.app"
 if [[ ! -d "$EMACS_APP" ]]; then
@@ -188,8 +347,13 @@ fi
 if [[ -d "$EMACS_APP" ]]; then
     # STEP 5: Icon handling and Info.plist updates (use PlistBuddy commands found in repo)
     PLIST="$EMACS_APP/Contents/Info.plist"
+
+    RESOURCES_DIR="$EMACS_APP/Contents/Resources"
+
+    # Track which icon we ended up using so we can reuse it for Emacs Client.app.
+    ICONS_DIR_FOR_CLIENT=""
+
     if [[ -n "$ICON_PATH" ]]; then
-        RESOURCES_DIR="$EMACS_APP/Contents/Resources"
         echocmd mkdir -p "$RESOURCES_DIR"
         # If ICON_PATH is a URL, download it first
         tmp_download=""
@@ -223,7 +387,7 @@ if [[ -d "$EMACS_APP" ]]; then
         echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconName' "$PLIST" 2>/dev/null || true
         echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIcons' "$PLIST" 2>/dev/null || true
         echocmd /usr/libexec/PlistBuddy -c 'Delete :CFBundleIconFiles' "$PLIST" 2>/dev/null || true
-        
+
         # Remove Assets.car unless user explicitly provided one
         if [[ -z "$ASSETS_PATH" ]]; then
             echocmd rm -f "$RESOURCES_DIR/Assets.car" || true
@@ -234,11 +398,11 @@ if [[ -d "$EMACS_APP" ]]; then
             # When using Assets.car, CFBundleIconName is primary, skip other icon keys
             echo "Using Assets.car with CFBundleIconName"
         fi
-        
+
         # Set icon keys - these work whether Assets.car exists or not
         # CFBundleIconFile points to the .icns file (without extension)
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string Emacs" "$PLIST"
-        
+
         # Modern CFBundleIcons dictionary structure (macOS 10.13+)
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$PLIST" 2>/dev/null || true
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$PLIST" 2>/dev/null || true
@@ -249,7 +413,9 @@ if [[ -d "$EMACS_APP" ]]; then
         echocmd touch "$EMACS_APP"
         echocmd touch "$EMACS_APP/Contents"
         echocmd touch "$EMACS_APP/Contents/Info.plist"
-        
+
+        ICONS_DIR_FOR_CLIENT="$RESOURCES_DIR"
+
         echo "Icon applied successfully to $RESOURCES_DIR/Emacs.icns"
         echo ""
         echo "To ensure the icon displays immediately, run these commands:"
@@ -273,6 +439,38 @@ if [[ -d "$EMACS_APP" ]]; then
             rm -f "${tmp_download}" || true
         fi
     fi
+
+    # STEP 5b: Build Emacs Client.app (optional)
+    if [[ $BUILD_CLIENT_APP -eq 1 ]]; then
+        # Determine version and emacsclient prefix
+        EMACS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST" 2>/dev/null || true)
+        if [[ -z "$EMACS_VERSION" ]]; then
+            EMACS_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" 2>/dev/null || true)
+        fi
+        [[ -z "$EMACS_VERSION" ]] && EMACS_VERSION="0"
+
+        # Prefer prefix if user supplied one; else derive from Emacs.app layout
+        CLIENT_PREFIX="$PREFIX"
+        if [[ -z "$CLIENT_PREFIX" ]]; then
+            # mac-port build usually has emacsclient in Contents/MacOS
+            if [[ -x "$EMACS_APP/Contents/MacOS/bin/emacsclient" ]]; then
+                CLIENT_PREFIX="$EMACS_APP/Contents/MacOS"
+            elif [[ -x "$EMACS_APP/Contents/MacOS/emacsclient" ]]; then
+                CLIENT_PREFIX="$EMACS_APP/Contents/MacOS"
+            else
+                # Fall back to /usr/local if present in PATH
+                CLIENT_PREFIX="/usr/local"
+            fi
+        fi
+
+        # Ensure we pass a directory containing Emacs.icns and optional Assets.car
+        if [[ -z "$ICONS_DIR_FOR_CLIENT" ]]; then
+            ICONS_DIR_FOR_CLIENT="$RESOURCES_DIR"
+        fi
+
+        create_emacs_client_app "$ICONS_DIR_FOR_CLIENT" "$EMACS_VERSION" "$CLIENT_PREFIX" "$APP_DIR"
+    fi
+
     # Optionally inject protected resources usage descriptions found in EmacsBase.rb
     # (Camera/Microphone/Speech). These can be useful for sandboxed builds.
     echo "Ensuring protected resources usage descriptions exist in Info.plist"
@@ -290,27 +488,27 @@ if [[ -d "$EMACS_APP" ]]; then
         echo "Error: Resources directory not found"
         exit 1
     fi
-    
+
     if [[ ! -f "$RESOURCES_DIR/Emacs.icns" ]]; then
         echo "Warning: Resources directory is missing Emacs.icns (may use default icon)"
     else
         echo "Resources directory contains necessary files"
     fi
-    
+
     # Check if Contents/MacOS directory contains necessary files
     MACOS_DIR="$EMACS_APP/Contents/MacOS"
     if [[ ! -d "$MACOS_DIR" ]]; then
         echo "Error: MacOS directory not found"
         exit 1
     fi
-    
+
     if [[ ! -f "$MACOS_DIR/Emacs" ]]; then
         echo "Error: MacOS directory is missing Emacs executable"
         exit 1
     else
         echo "MacOS directory contains necessary files"
     fi
-    
+
     # Check if Contents/Info.plist exists
     PLIST_FILE="$EMACS_APP/Contents/Info.plist"
     if [[ ! -f "$PLIST_FILE" ]]; then
@@ -319,36 +517,36 @@ if [[ -d "$EMACS_APP" ]]; then
     else
         echo "Info.plist file exists"
     fi
-    
+
     # Codesign (self-sign / ad-hoc by default) if requested
     if [[ $NO_SIGN -eq 0 ]]; then
         echo "Signing app: $EMACS_APP (identity: $SIGN_IDENTITY)"
-        
+
         # Sign all dylibs, executables, and nested bundles first (bottom-up)
         echo "Signing individual binaries and libraries..."
-        
+
         # Sign all .dylib files
         find "$EMACS_APP" -type f -name "*.dylib" -print0 2>/dev/null | while IFS= read -r -d '' lib; do
             echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$lib" 2>/dev/null || true
         done
-        
+
         # Sign all executables in MacOS and libexec directories
-        find "$EMACS_APP/Contents/MacOS" "$EMACS_APP/Contents/libexec" -type f -perm +111 -print0 2>/dev/null | while IFS= read -r -d '' exe; do
+        find "$EMACS_APP/Contents/MacOS" "$EMACS_APP/Contents/libexec" -type f -perm -111 -print0 2>/dev/null | while IFS= read -r -d '' exe; do
             # Skip if it's a script
             if file "$exe" | grep -q "Mach-O"; then
                 echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$exe" 2>/dev/null || true
             fi
         done
-        
+
         # Sign any frameworks
         find "$EMACS_APP/Contents/Frameworks" -type d -name "*.framework" 2>/dev/null | while IFS= read -r framework; do
             echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$framework" 2>/dev/null || true
         done
-        
+
         # Finally sign the main app bundle (without --deep, as we've already signed everything)
         echo "Signing main app bundle..."
         echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$EMACS_APP"
-        
+
         # Verify the signature
         echo "Verifying code signature..."
         if /usr/bin/codesign --verify --verbose=2 "$EMACS_APP" 2>&1; then
@@ -359,7 +557,7 @@ if [[ -d "$EMACS_APP" ]]; then
     else
         echo "Skipping codesign as requested"
     fi
-    
+
     # Remove quarantine attribute so the built app can be launched locally without Gatekeeper prompts
     if command -v xattr >/dev/null 2>&1; then
         echocmd /usr/bin/xattr -dr com.apple.quarantine "$EMACS_APP" || true
