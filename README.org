@@ -8,7 +8,7 @@ The script automates the typical mac-port style build steps:
 
 - Run =autogen.sh= / =autoreconf=
 - Run =./configure= with mac options and =--enable-mac-app=
-- Execute =make bootstrap=, =make=, =make install=
+- Execute =make= and =make install=
 - Post-build icon installation and Info.plist configuration
 - Code sign the built app (individual binaries then main bundle)
 - Remove quarantine attribute for local launching
