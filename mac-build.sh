@@ -13,6 +13,8 @@ Options:
   --icon PATH         Path to an icon file (PNG or ICNS). PNG will be converted to ICNS.
   --assets PATH       Path to Assets.car file to apply (Tahoe macOS 26+)
   --build-client-app  Build "Emacs Client.app" wrapper for emacsclient
+  --with-xwidgets     Enable xwidgets support
+  --with-mac-metal    Enable mac-metal rendering support
   --jobs N            Number of parallel make jobs (default: cpu count)
   --sign-identity ID  Codesign identity (default: ad-hoc '-'). Use --no-sign to skip signing.
   --no-sign           Do not run codesign after build
@@ -26,26 +28,43 @@ APP_DIR="$HOME/Documents/emacs-mac-build"
 ICON_PATH=""
 ASSETS_PATH=""
 BUILD_CLIENT_APP=0
+WITH_XWIDGETS=0
+WITH_MAC_METAL=0
 JOBS=""
 PREFIX=""
 DRY_RUN=0
 SIGN_IDENTITY="-"
 NO_SIGN=0
+
+require_option_arg() {
+    local option="$1"
+    local value="${2-}"
+    if [[ -z "$value" || "$value" == --* ]]; then
+        echo "Missing value for $option"
+        usage
+        exit 1
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
     --src)
+        require_option_arg "$1" "${2-}"
         SRC_DIR="$2"
         shift 2
         ;;
     --app-dir)
+        require_option_arg "$1" "${2-}"
         APP_DIR="$2"
         shift 2
         ;;
     --icon)
+        require_option_arg "$1" "${2-}"
         ICON_PATH="$2"
         shift 2
         ;;
     --assets)
+        require_option_arg "$1" "${2-}"
         ASSETS_PATH="$2"
         shift 2
         ;;
@@ -53,15 +72,30 @@ while [[ $# -gt 0 ]]; do
         BUILD_CLIENT_APP=1
         shift
         ;;
+    --with-xwidgets)
+        WITH_XWIDGETS=1
+        shift
+        ;;
+    --with-mac-metal)
+        WITH_MAC_METAL=1
+        shift
+        ;;
     --jobs)
-        JOBS="$2"
-        shift 2
+        if [[ -n "${2-}" && "${2-}" != --* ]]; then
+            JOBS="$2"
+            shift 2
+        else
+            echo "No value supplied for --jobs; using detected CPU count"
+            shift
+        fi
         ;;
     --prefix)
+        require_option_arg "$1" "${2-}"
         PREFIX="$2"
         shift 2
         ;;
     --sign-identity)
+        require_option_arg "$1" "${2-}"
         SIGN_IDENTITY="$2"
         shift 2
         ;;
@@ -98,6 +132,28 @@ echocmd() {
     fi
 }
 
+patch_xwidgets_webkit_headers() {
+    local configure_ac="$SRC_DIR/configure.ac"
+
+    if [[ ! -f "$configure_ac" ]]; then
+        echo "Error: configure.ac not found at $configure_ac"
+        exit 1
+    fi
+
+    if grep -q 'WEBKIT_CFLAGS="-I${SDKROOT}/System/Library/Frameworks/WebKit.framework/Headers"' "$configure_ac"; then
+        echo "xwidgets WebKit SDKROOT fix already present in configure.ac"
+        return
+    fi
+
+    if ! grep -q 'WEBKIT_CFLAGS="-I/System/Library/Frameworks/WebKit.framework/Headers"' "$configure_ac"; then
+        echo "xwidgets WebKit header path not found in configure.ac; skipping patch"
+        return
+    fi
+
+    echo "Patching configure.ac to use SDKROOT for WebKit headers"
+    echocmd perl -0pi -e 's%    WEBKIT_CFLAGS="-I/System/Library/Frameworks/WebKit.framework/Headers"%    SDKROOT=\$(xcrun --show-sdk-path 2>/dev/null || true)\n    if test -n "\$SDKROOT"; then\n      WEBKIT_CFLAGS="-I\${SDKROOT}/System/Library/Frameworks/WebKit.framework/Headers"\n    else\n      WEBKIT_CFLAGS="-I/System/Library/Frameworks/WebKit.framework/Headers"\n    fi%' "$configure_ac"
+}
+
 escape_for_applescript_shell() {
     # Escape a string for safe insertion into an AppleScript: do shell script "..." command.
     # We primarily need to escape single quotes because we'll wrap PATH in single quotes.
@@ -109,15 +165,17 @@ escape_for_applescript_shell() {
 create_emacs_client_app() {
     # Creates "Emacs Client.app" using osacompile and patches its Info.plist.
     # Uses the emacsclient installed alongside the built Emacs.
-    local icons_dir="$1"   # directory containing Emacs.icns (and optional Assets.car)
+    local icons_dir="$1" # directory containing Emacs.icns (and optional Assets.car)
     local version="$2"
-    local prefix="$3"
-    local output_dir="$4"  # directory where Emacs Client.app should be created
+    local client_bin="$3"
+    local output_dir="$4" # directory where Emacs Client.app should be created
 
     echo "Creating Emacs Client.app"
 
     local escaped_path
     escaped_path=$(escape_for_applescript_shell "${PATH}")
+    local escaped_client_bin
+    escaped_client_bin=$(escape_for_applescript_shell "${client_bin}")
 
     local buildpath="$SRC_DIR"
     local client_script="$buildpath/emacs-client.applescript"
@@ -130,7 +188,7 @@ on open theDropped
   repeat with oneDrop in theDropped
     set dropPath to quoted form of POSIX path of oneDrop
     try
-      do shell script "PATH='${escaped_path}' ${prefix}/bin/emacsclient -c -a '' -n " & dropPath
+      do shell script "PATH='${escaped_path}' '${escaped_client_bin}' -c -a '' -n " & dropPath
     end try
   end repeat
   try
@@ -141,7 +199,7 @@ end open
 -- Handle launch without files (from Spotlight, Dock, or Finder)
 on run
   try
-    do shell script "PATH='${escaped_path}' ${prefix}/bin/emacsclient -c -a '' -n"
+    do shell script "PATH='${escaped_path}' '${escaped_client_bin}' -c -a '' -n"
   end try
   try
     do shell script "open -a Emacs"
@@ -151,7 +209,7 @@ end run
 -- Handle org-protocol:// URLs (for org-capture, org-roam, etc.)
 on open location this_URL
   try
-    do shell script "PATH='${escaped_path}' ${prefix}/bin/emacsclient -n " & quoted form of this_URL
+    do shell script "PATH='${escaped_path}' '${escaped_client_bin}' -n " & quoted form of this_URL
   end try
   try
     do shell script "open -a Emacs"
@@ -167,24 +225,24 @@ EOF
     local client_plist="$client_app_dir/Contents/Info.plist"
 
     # Basic metadata
-    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier org.gnu.EmacsClient" "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier org.gnu.EmacsClient" "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string org.gnu.EmacsClient" "$client_plist"
-    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleName Emacs\ Client" "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleName Emacs\ Client" "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleName string Emacs Client" "$client_plist"
-    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Emacs\ Client" "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Emacs\ Client" "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Emacs Client" "$client_plist"
-    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleGetInfoString Emacs\ Client\ ${version}" "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleGetInfoString Emacs\ Client\ ${version}" "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleGetInfoString string Emacs Client ${version}" "$client_plist"
-    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${version}" "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${version}" "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string ${version}" "$client_plist"
-    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${version}" "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${version}" "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string ${version}" "$client_plist"
-    echocmd /usr/libexec/PlistBuddy -c "Set :LSApplicationCategoryType public.app-category.productivity" "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :LSApplicationCategoryType public.app-category.productivity" "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :LSApplicationCategoryType string public.app-category.productivity" "$client_plist"
 
     local year
     year=$(date +%Y)
-    echocmd /usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright Copyright\ \\U00A9\ 1989-${year}\ Free\ Software\ Foundation,\ Inc." "$client_plist" 2>/dev/null || \
+    echocmd /usr/libexec/PlistBuddy -c "Set :NSHumanReadableCopyright Copyright\ \\U00A9\ 1989-${year}\ Free\ Software\ Foundation,\ Inc." "$client_plist" 2>/dev/null ||
         echocmd /usr/libexec/PlistBuddy -c "Add :NSHumanReadableCopyright string Copyright \\U00A9 1989-${year} Free Software Foundation, Inc." "$client_plist"
 
     # Document types
@@ -291,39 +349,91 @@ echo "  Source dir: $SRC_DIR"
 echo "  App dir:    $APP_DIR"
 [[ -n "$ICON_PATH" ]] && echo "  Icon:       $ICON_PATH"
 [[ -n "$ASSETS_PATH" ]] && echo "  Assets:     $ASSETS_PATH"
+[[ $WITH_XWIDGETS -eq 1 ]] && echo "  Xwidgets:   enabled" || echo "  Xwidgets:   disabled"
+[[ $WITH_MAC_METAL -eq 1 ]] && echo "  Mac Metal:  enabled" || echo "  Mac Metal:  disabled"
 echo "  Jobs:       $JOBS"
 [[ $NO_SIGN -eq 0 ]] && echo "  Codesign:   will sign with identity: $SIGN_IDENTITY" || echo "  Codesign:   skipped"
 cd "$SRC_DIR"
+
 # STEP 2: Bootstrap (autogen) and configure
+if [[ $WITH_XWIDGETS -eq 1 ]]; then
+    patch_xwidgets_webkit_headers
+fi
 if [[ -f autogen.sh ]]; then
     echocmd ./autogen.sh
 else
     echocmd autoreconf -fvi
 fi
 # Prepare configure args
-# Detect architecture and set appropriate flags
-ARCH=$(uname -m)
-if [[ "$ARCH" == "arm64" ]]; then
-    CFLAGS="-O2 -mcpu=native -march=native -mtune=native -fomit-frame-pointer -DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT"
-else
-    # For x86_64, -mcpu is not valid
-    CFLAGS="-O2 -march=native -mtune=native -fomit-frame-pointer -DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT"
+# Keep compiler flags conservative. Homebrew formulas only add the select-related
+# defines here; they do not force native CPU tuning flags.
+CFLAGS="-O2 -DFD_SETSIZE=10000 -DDARWIN_UNLIMITED_SELECT"
+
+BREW_PREFIX=""
+if command -v brew >/dev/null 2>&1; then
+    BREW_PREFIX="$(brew --prefix 2>/dev/null || true)"
 fi
-CONFIGURE_OPTS=(--with-modules --with-native-compilation=aot --with-tree-sitter --enable-mac-self-contained --with-xwidgets --without-dbus --with-mac-metal)
+if [[ -z "$BREW_PREFIX" ]]; then
+    if [[ -d /opt/homebrew ]]; then
+        BREW_PREFIX="/opt/homebrew"
+    elif [[ -d /usr/local ]]; then
+        BREW_PREFIX="/usr/local"
+    fi
+fi
+
+# Set up PKG_CONFIG_PATH and other environment variables for modules support
+if [[ -n "$BREW_PREFIX" ]]; then
+    export PKG_CONFIG_PATH="$BREW_PREFIX/lib/pkgconfig:$BREW_PREFIX/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    export LDFLAGS="-L$BREW_PREFIX/lib${LDFLAGS:+ $LDFLAGS}"
+    export CPPFLAGS="-I$BREW_PREFIX/include${CPPFLAGS:+ $CPPFLAGS}"
+fi
+
+CONFIGURE_OPTS=(--with-modules --with-native-compilation=aot --with-tree-sitter --enable-mac-self-contained --without-dbus)
+if [[ $WITH_XWIDGETS -eq 1 ]]; then
+    CONFIGURE_OPTS+=(--with-xwidgets)
+fi
+if [[ $WITH_MAC_METAL -eq 1 ]]; then
+    CONFIGURE_OPTS+=(--with-mac-metal)
+fi
 # Ensure we pass the app dir to enable-mac-app
 CONFIGURE_OPTS+=("--enable-mac-app=$APP_DIR")
 if [[ -n "$PREFIX" ]]; then
     CONFIGURE_OPTS+=("--prefix=$PREFIX")
 fi
 echo "Configuring Emacs (this may take a moment)"
-echocmd env CFLAGS="$CFLAGS" ./configure "${CONFIGURE_OPTS[@]}"
-# STEP 3: Build
-echo "Running make (bootstrap, then make and make install)"
-if echocmd make -j"$JOBS" bootstrap; then
-    echo "Bootstrap succeeded"
+echo "Environment:"
+echo "  CFLAGS=$CFLAGS"
+echo "  LDFLAGS=$LDFLAGS"
+echo "  CPPFLAGS=$CPPFLAGS"
+echo "  PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+echocmd env CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" CPPFLAGS="$CPPFLAGS" PKG_CONFIG_PATH="$PKG_CONFIG_PATH" ./configure "${CONFIGURE_OPTS[@]}"
+
+# STEP 2.5: Verify modules support after configure
+echo "Verifying module support configuration..."
+if [ -f src/config.h ]; then
+    if grep -q "^#define HAVE_MODULES 1" src/config.h; then
+        echo "✓ Module support is enabled in config.h"
+    else
+        echo "Error: configure did not enable module support"
+        exit 1
+    fi
 else
-    echo "Warning: bootstrap failed; continuing with normal build"
+    echo "Error: src/config.h not found after configure"
+    exit 1
 fi
+
+# Check if module.o will be built
+if [ -f src/Makefile ]; then
+    if grep -q "module\.o" src/Makefile; then
+        echo "✓ module.o is in build targets"
+    else
+        echo "Error: module.o not found in src/Makefile"
+        exit 1
+    fi
+fi
+
+# STEP 3: Build
+echo "Running make and make install"
 echocmd make -j"$JOBS"
 # Use make install to install into app dir / prefix as configured
 if [[ -n "$PREFIX" ]]; then
@@ -332,6 +442,39 @@ else
     echo "Running 'make install' -- this will install the Mac App to $APP_DIR (if configured)."
 fi
 echocmd make install
+
+# STEP 3.5: Verify module support in built binary
+echo "Verifying module support in built Emacs..."
+BUILT_EMACS=""
+if [ -f "nextstep/Emacs.app/Contents/MacOS/Emacs" ]; then
+    BUILT_EMACS="nextstep/Emacs.app/Contents/MacOS/Emacs"
+elif [ -f "nextstep/Emacs.app/Contents/MacOS/bin/emacs" ]; then
+    BUILT_EMACS="nextstep/Emacs.app/Contents/MacOS/bin/emacs"
+elif [ -f "$APP_DIR/Emacs.app/Contents/MacOS/Emacs" ]; then
+    BUILT_EMACS="$APP_DIR/Emacs.app/Contents/MacOS/Emacs"
+elif [ -f "$APP_DIR/Emacs.app/Contents/MacOS/bin/emacs" ]; then
+    BUILT_EMACS="$APP_DIR/Emacs.app/Contents/MacOS/bin/emacs"
+fi
+
+if [ -n "$BUILT_EMACS" ] && [ -f "$BUILT_EMACS" ]; then
+    echo "Checking module support in: $BUILT_EMACS"
+    MODULE_CHECK=$("$BUILT_EMACS" --batch --eval '(princ (if (fboundp (quote module-load)) "YES" "NO"))' 2>/dev/null || echo "ERROR")
+    if [ "$MODULE_CHECK" = "YES" ]; then
+        echo "✓ Module support is working!"
+    else
+        echo "✗ WARNING: Module support check returned: $MODULE_CHECK"
+        echo "   Built Emacs does not expose module-load"
+
+        if nm "$BUILT_EMACS" | grep -q "module_init\|Fmodule_load"; then
+            echo "✓ Module symbols found in binary"
+        else
+            echo "✗ Module symbols NOT found in binary - rebuild may be needed"
+        fi
+    fi
+else
+    echo "⚠ Could not locate built Emacs binary for verification"
+fi
+
 # STEP 4: Post-build packaging / wrapper
 EMACS_APP="${APP_DIR}/Emacs.app"
 if [[ ! -d "$EMACS_APP" ]]; then
@@ -449,18 +592,18 @@ if [[ -d "$EMACS_APP" ]]; then
         fi
         [[ -z "$EMACS_VERSION" ]] && EMACS_VERSION="0"
 
-        # Prefer prefix if user supplied one; else derive from Emacs.app layout
-        CLIENT_PREFIX="$PREFIX"
-        if [[ -z "$CLIENT_PREFIX" ]]; then
-            # mac-port build usually has emacsclient in Contents/MacOS
-            if [[ -x "$EMACS_APP/Contents/MacOS/bin/emacsclient" ]]; then
-                CLIENT_PREFIX="$EMACS_APP/Contents/MacOS"
-            elif [[ -x "$EMACS_APP/Contents/MacOS/emacsclient" ]]; then
-                CLIENT_PREFIX="$EMACS_APP/Contents/MacOS"
-            else
-                # Fall back to /usr/local if present in PATH
-                CLIENT_PREFIX="/usr/local"
-            fi
+        CLIENT_BIN=""
+        if [[ -n "$PREFIX" && -x "$PREFIX/bin/emacsclient" ]]; then
+            CLIENT_BIN="$PREFIX/bin/emacsclient"
+        elif [[ -x "$EMACS_APP/Contents/MacOS/bin/emacsclient" ]]; then
+            CLIENT_BIN="$EMACS_APP/Contents/MacOS/bin/emacsclient"
+        elif [[ -x "$EMACS_APP/Contents/MacOS/emacsclient" ]]; then
+            CLIENT_BIN="$EMACS_APP/Contents/MacOS/emacsclient"
+        elif command -v emacsclient >/dev/null 2>&1; then
+            CLIENT_BIN="$(command -v emacsclient)"
+        else
+            echo "Error: could not locate emacsclient for Emacs Client.app"
+            exit 1
         fi
 
         # Ensure we pass a directory containing Emacs.icns and optional Assets.car
@@ -468,7 +611,7 @@ if [[ -d "$EMACS_APP" ]]; then
             ICONS_DIR_FOR_CLIENT="$RESOURCES_DIR"
         fi
 
-        create_emacs_client_app "$ICONS_DIR_FOR_CLIENT" "$EMACS_VERSION" "$CLIENT_PREFIX" "$APP_DIR"
+        create_emacs_client_app "$ICONS_DIR_FOR_CLIENT" "$EMACS_VERSION" "$CLIENT_BIN" "$APP_DIR"
     fi
 
     # Optionally inject protected resources usage descriptions found in EmacsBase.rb
@@ -502,11 +645,11 @@ if [[ -d "$EMACS_APP" ]]; then
         exit 1
     fi
 
-    if [[ ! -f "$MACOS_DIR/Emacs" ]]; then
+    if [[ -f "$MACOS_DIR/Emacs" || -f "$MACOS_DIR/bin/emacs" ]]; then
+        echo "MacOS directory contains necessary files"
+    else
         echo "Error: MacOS directory is missing Emacs executable"
         exit 1
-    else
-        echo "MacOS directory contains necessary files"
     fi
 
     # Check if Contents/Info.plist exists
@@ -531,17 +674,27 @@ if [[ -d "$EMACS_APP" ]]; then
         done
 
         # Sign all executables in MacOS and libexec directories
-        find "$EMACS_APP/Contents/MacOS" "$EMACS_APP/Contents/libexec" -type f -perm -111 -print0 2>/dev/null | while IFS= read -r -d '' exe; do
-            # Skip if it's a script
-            if file "$exe" | grep -q "Mach-O"; then
-                echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$exe" 2>/dev/null || true
-            fi
-        done
+        if [[ -d "$EMACS_APP/Contents/MacOS" ]]; then
+            find "$EMACS_APP/Contents/MacOS" -type f -perm -111 -print0 2>/dev/null | while IFS= read -r -d '' exe; do
+                if file "$exe" | grep -q "Mach-O"; then
+                    echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$exe" 2>/dev/null || true
+                fi
+            done
+        fi
+        if [[ -d "$EMACS_APP/Contents/libexec" ]]; then
+            find "$EMACS_APP/Contents/libexec" -type f -perm -111 -print0 2>/dev/null | while IFS= read -r -d '' exe; do
+                if file "$exe" | grep -q "Mach-O"; then
+                    echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$exe" 2>/dev/null || true
+                fi
+            done
+        fi
 
         # Sign any frameworks
-        find "$EMACS_APP/Contents/Frameworks" -type d -name "*.framework" 2>/dev/null | while IFS= read -r framework; do
-            echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$framework" 2>/dev/null || true
-        done
+        if [[ -d "$EMACS_APP/Contents/Frameworks" ]]; then
+            find "$EMACS_APP/Contents/Frameworks" -type d -name "*.framework" 2>/dev/null | while IFS= read -r framework; do
+                echocmd /usr/bin/codesign --force --sign "$SIGN_IDENTITY" "$framework" 2>/dev/null || true
+            done
+        fi
 
         # Finally sign the main app bundle (without --deep, as we've already signed everything)
         echo "Signing main app bundle..."
