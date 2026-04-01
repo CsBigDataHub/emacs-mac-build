@@ -184,35 +184,61 @@ create_emacs_client_app() {
 -- Emacs Client AppleScript Application
 -- Handles opening files from Finder, drag-and-drop, and launching from Spotlight/Dock
 
+on siblingEmacsAppPath()
+  tell application "Finder"
+    set clientBundle to (container of (path to me)) as alias
+    set parentDir to (container of clientBundle) as alias
+    return POSIX path of parentDir & "Emacs.app"
+  end tell
+end siblingEmacsAppPath
+
+on emacsclientPath()
+  set siblingApp to siblingEmacsAppPath()
+  set candidatePaths to {siblingApp & "/Contents/MacOS/bin/emacsclient", siblingApp & "/Contents/MacOS/emacsclient", "${escaped_client_bin}"}
+  repeat with candidatePath in candidatePaths
+    try
+      do shell script "test -x " & quoted form of (candidatePath as text)
+      return candidatePath as text
+    end try
+  end repeat
+  error "Could not locate emacsclient"
+end emacsclientPath
+
 on open theDropped
+  set clientBin to emacsclientPath()
+  set siblingApp to siblingEmacsAppPath()
   repeat with oneDrop in theDropped
     set dropPath to quoted form of POSIX path of oneDrop
     try
-      do shell script "PATH='${escaped_path}' '${escaped_client_bin}' -c -a '' -n " & dropPath
+      do shell script "PATH='${escaped_path}' " & quoted form of clientBin & " -c -a '' -n " & dropPath
     end try
   end repeat
   try
-    do shell script "open -a Emacs"
+    do shell script "open -a " & quoted form of siblingApp
   end try
 end open
 
 -- Handle launch without files (from Spotlight, Dock, or Finder)
 on run
+  set clientBin to emacsclientPath()
+  set siblingApp to siblingEmacsAppPath()
   try
-    do shell script "PATH='${escaped_path}' '${escaped_client_bin}' -c -a '' -n"
+    do shell script "PATH='${escaped_path}' " & quoted form of clientBin & " -c -a '' -n"
   end try
   try
-    do shell script "open -a Emacs"
+    do shell script "open -a " & quoted form of siblingApp
   end try
 end run
 
 -- Handle org-protocol:// URLs (for org-capture, org-roam, etc.)
 on open location this_URL
+  set clientBin to emacsclientPath()
+  set siblingApp to siblingEmacsAppPath()
   try
-    do shell script "PATH='${escaped_path}' '${escaped_client_bin}' -n " & quoted form of this_URL
+    do shell script "PATH='${escaped_path}' " & quoted form of clientBin & " -n " & quoted form of this_URL
   end try
   try
-    do shell script "open -a Emacs"
+    do shell script "open -a " & quoted form of siblingApp
   end try
 end open location
 EOF
@@ -488,6 +514,40 @@ if [[ ! -d "$EMACS_APP" ]]; then
     fi
 fi
 if [[ -d "$EMACS_APP" ]]; then
+    # Align native-comp layout with runtime lookup.  Emacs resolves the
+    # bundled system cache relative to Contents/MacOS as ../native-lisp/.
+    FRAMEWORKS_NATIVE_LISP="$EMACS_APP/Contents/Frameworks/native-lisp"
+    CONTENTS_NATIVE_LISP="$EMACS_APP/Contents/native-lisp"
+    if [[ -d "$FRAMEWORKS_NATIVE_LISP" && ! -e "$CONTENTS_NATIVE_LISP" ]]; then
+        echo "Relocating native-lisp from Contents/Frameworks to Contents"
+        echocmd mv "$FRAMEWORKS_NATIVE_LISP" "$CONTENTS_NATIVE_LISP"
+        if [[ -d "$EMACS_APP/Contents/Frameworks" ]]; then
+            rmdir "$EMACS_APP/Contents/Frameworks" 2>/dev/null || true
+        fi
+    fi
+
+    # The dumped runtime can retain a build-tree system eln path.
+    # Override that at startup so the app always prefers its bundled
+    # Contents/native-lisp directory, even after the bundle is moved.
+    SITE_LISP_DIR="$EMACS_APP/Contents/Resources/site-lisp"
+    SITE_START_FILE="$SITE_LISP_DIR/site-start.el"
+    echocmd mkdir -p "$SITE_LISP_DIR"
+    if [[ $DRY_RUN -eq 0 ]]; then
+        cat >"$SITE_START_FILE" <<'EOF'
+;;; site-start.el --- App-local startup adjustments  -*- lexical-binding: t; -*-
+
+(when (boundp 'native-comp-eln-load-path)
+  (let ((app-native-lisp
+         (expand-file-name "../native-lisp/" invocation-directory)))
+    (when (file-directory-p app-native-lisp)
+      (setq native-comp-eln-load-path
+            (append (butlast native-comp-eln-load-path)
+                    (list app-native-lisp))))))
+EOF
+    else
+        echo "+ cat >$SITE_START_FILE <<'EOF' ..."
+    fi
+
     # STEP 5: Icon handling and Info.plist updates (use PlistBuddy commands found in repo)
     PLIST="$EMACS_APP/Contents/Info.plist"
 
