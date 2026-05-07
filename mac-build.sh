@@ -14,7 +14,8 @@ Options:
   --assets PATH       Path to Assets.car file to apply (Tahoe macOS 26+)
   --build-client-app  Build "Emacs Client.app" wrapper for emacsclient
   --with-xwidgets     Enable xwidgets support
-  --with-mac-metal    Enable mac-metal rendering support
+  --with-native-compilation MODE
+                      Native compilation mode: aot, yes, no, or ifavailable (default: aot)
   --jobs N            Number of parallel make jobs (default: cpu count)
   --sign-identity ID  Codesign identity (default: ad-hoc '-'). Use --no-sign to skip signing.
   --no-sign           Do not run codesign after build
@@ -29,7 +30,7 @@ ICON_PATH=""
 ASSETS_PATH=""
 BUILD_CLIENT_APP=0
 WITH_XWIDGETS=0
-WITH_MAC_METAL=0
+NATIVE_COMPILATION="aot"
 JOBS=""
 PREFIX=""
 DRY_RUN=0
@@ -76,8 +77,31 @@ while [[ $# -gt 0 ]]; do
         WITH_XWIDGETS=1
         shift
         ;;
-    --with-mac-metal)
-        WITH_MAC_METAL=1
+    --with-native-compilation)
+        require_option_arg "$1" "${2-}"
+        case "$2" in
+        aot | yes | no | ifavailable)
+            NATIVE_COMPILATION="$2"
+            ;;
+        *)
+            echo "Invalid value for --with-native-compilation: $2"
+            echo "Expected one of: aot, yes, no, ifavailable"
+            exit 1
+            ;;
+        esac
+        shift 2
+        ;;
+    --with-native-compilation=*)
+        NATIVE_COMPILATION="${1#*=}"
+        case "$NATIVE_COMPILATION" in
+        aot | yes | no | ifavailable)
+            ;;
+        *)
+            echo "Invalid value for --with-native-compilation: $NATIVE_COMPILATION"
+            echo "Expected one of: aot, yes, no, ifavailable"
+            exit 1
+            ;;
+        esac
         shift
         ;;
     --jobs)
@@ -132,6 +156,119 @@ echocmd() {
     fi
 }
 
+append_colon_path() {
+    local current="$1"
+    local path="$2"
+    if [[ -z "$path" ]]; then
+        printf '%s' "$current"
+    elif [[ -z "$current" ]]; then
+        printf '%s' "$path"
+    elif [[ ":$current:" == *":$path:"* ]]; then
+        printf '%s' "$current"
+    else
+        printf '%s:%s' "$current" "$path"
+    fi
+}
+
+append_space_value() {
+    local current="$1"
+    local value="$2"
+    if [[ -z "$value" ]]; then
+        printf '%s' "$current"
+    elif [[ -z "$current" ]]; then
+        printf '%s' "$value"
+    else
+        printf '%s %s' "$current" "$value"
+    fi
+}
+
+brew_formula_prefix() {
+    local formula="$1"
+    if command -v brew >/dev/null 2>&1; then
+        brew --prefix "$formula" 2>/dev/null || true
+    fi
+}
+
+plist_delete() {
+    local plist="$1"
+    local key="$2"
+    echocmd /usr/libexec/PlistBuddy -c "Delete :$key" "$plist" 2>/dev/null || true
+}
+
+plist_add() {
+    local plist="$1"
+    local key="$2"
+    local type="$3"
+    local value="$4"
+    echocmd /usr/libexec/PlistBuddy -c "Add :$key $type $value" "$plist"
+}
+
+plist_set_string() {
+    local plist="$1"
+    local key="$2"
+    local value="$3"
+    plist_delete "$plist" "$key"
+    plist_add "$plist" "$key" string "$value"
+}
+
+build_runtime_path() {
+    local result="${PATH-}"
+    if [[ -n "$BREW_PREFIX" ]]; then
+        result=$(append_colon_path "$result" "$BREW_PREFIX/bin")
+        result=$(append_colon_path "$result" "$BREW_PREFIX/sbin")
+    fi
+    result=$(append_colon_path "$result" "/usr/bin")
+    result=$(append_colon_path "$result" "/bin")
+    result=$(append_colon_path "$result" "/usr/sbin")
+    result=$(append_colon_path "$result" "/sbin")
+    printf '%s' "$result"
+}
+
+find_gcc_version() {
+    local gcc_bin version best=""
+    if [[ -n "$BREW_PREFIX" ]]; then
+        for gcc_bin in "$BREW_PREFIX"/bin/gcc-[0-9]*; do
+            [[ -x "$gcc_bin" ]] || continue
+            version="${gcc_bin##*-}"
+            if [[ "$version" =~ ^[0-9]+$ && ( -z "$best" || "$version" -gt "$best" ) ]]; then
+                best="$version"
+            fi
+        done
+    fi
+    printf '%s' "$best"
+}
+
+find_emutls_dir() {
+    local gcc_prefix="$1"
+    local emutls=""
+    if [[ -n "$gcc_prefix" && -d "$gcc_prefix" ]]; then
+        emutls=$(find "$gcc_prefix" -name libemutls_w.a -print -quit 2>/dev/null || true)
+    fi
+    if [[ -z "$emutls" && -n "$BREW_PREFIX" && -d "$BREW_PREFIX/Cellar/gcc" ]]; then
+        emutls=$(find "$BREW_PREFIX/Cellar/gcc" -name libemutls_w.a -print -quit 2>/dev/null || true)
+    fi
+    [[ -n "$emutls" ]] && dirname "$emutls"
+}
+
+inject_runtime_environment() {
+    local plist="$1"
+    local runtime_path="$2"
+    local cc_path="$3"
+    local library_path="$4"
+
+    echo "Injecting runtime environment into Info.plist"
+    plist_delete "$plist" "LSEnvironment"
+    echocmd /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$plist"
+    plist_set_string "$plist" "LSEnvironment:EMACS_MAC_PATH" "$runtime_path"
+    plist_set_string "$plist" "LSEnvironment:EMACS_PLUS_PATH" "$runtime_path"
+    if [[ -n "$cc_path" ]]; then
+        plist_set_string "$plist" "LSEnvironment:CC" "$cc_path"
+    fi
+    if [[ -n "$library_path" ]]; then
+        plist_set_string "$plist" "LSEnvironment:LIBRARY_PATH" "$library_path"
+    fi
+}
+
 patch_xwidgets_webkit_headers() {
     local configure_ac="$SRC_DIR/configure.ac"
 
@@ -140,6 +277,7 @@ patch_xwidgets_webkit_headers() {
         exit 1
     fi
 
+    # shellcheck disable=SC2016 # Match the literal configure.ac text.
     if grep -q 'WEBKIT_CFLAGS="-I${SDKROOT}/System/Library/Frameworks/WebKit.framework/Headers"' "$configure_ac"; then
         echo "xwidgets WebKit SDKROOT fix already present in configure.ac"
         return
@@ -151,14 +289,17 @@ patch_xwidgets_webkit_headers() {
     fi
 
     echo "Patching configure.ac to use SDKROOT for WebKit headers"
+    # shellcheck disable=SC2016 # Perl replacement writes shell code containing literal SDKROOT references.
     echocmd perl -0pi -e 's%    WEBKIT_CFLAGS="-I/System/Library/Frameworks/WebKit.framework/Headers"%    SDKROOT=\$(xcrun --show-sdk-path 2>/dev/null || true)\n    if test -n "\$SDKROOT"; then\n      WEBKIT_CFLAGS="-I\${SDKROOT}/System/Library/Frameworks/WebKit.framework/Headers"\n    else\n      WEBKIT_CFLAGS="-I/System/Library/Frameworks/WebKit.framework/Headers"\n    fi%' "$configure_ac"
 }
 
 escape_for_applescript_shell() {
-    # Escape a string for safe insertion into an AppleScript: do shell script "..." command.
-    # We primarily need to escape single quotes because we'll wrap PATH in single quotes.
+    # Escape for shell single quotes, then for the AppleScript double-quoted
+    # string that contains the shell command.
     local s="$1"
     s=${s//"'"/"'\\''"}
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
     printf '%s' "$s"
 }
 
@@ -173,7 +314,7 @@ create_emacs_client_app() {
     echo "Creating Emacs Client.app"
 
     local escaped_path
-    escaped_path=$(escape_for_applescript_shell "${PATH}")
+    escaped_path=$(escape_for_applescript_shell "${RUNTIME_PATH:-${PATH-}}")
     local escaped_client_bin
     escaped_client_bin=$(escape_for_applescript_shell "${client_bin}")
 
@@ -376,7 +517,7 @@ echo "  App dir:    $APP_DIR"
 [[ -n "$ICON_PATH" ]] && echo "  Icon:       $ICON_PATH"
 [[ -n "$ASSETS_PATH" ]] && echo "  Assets:     $ASSETS_PATH"
 [[ $WITH_XWIDGETS -eq 1 ]] && echo "  Xwidgets:   enabled" || echo "  Xwidgets:   disabled"
-[[ $WITH_MAC_METAL -eq 1 ]] && echo "  Mac Metal:  enabled" || echo "  Mac Metal:  disabled"
+echo "  NativeComp: $NATIVE_COMPILATION"
 echo "  Jobs:       $JOBS"
 [[ $NO_SIGN -eq 0 ]] && echo "  Codesign:   will sign with identity: $SIGN_IDENTITY" || echo "  Codesign:   skipped"
 cd "$SRC_DIR"
@@ -407,19 +548,84 @@ if [[ -z "$BREW_PREFIX" ]]; then
     fi
 fi
 
-# Set up PKG_CONFIG_PATH and other environment variables for modules support
-if [[ -n "$BREW_PREFIX" ]]; then
-    export PKG_CONFIG_PATH="$BREW_PREFIX/lib/pkgconfig:$BREW_PREFIX/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    export LDFLAGS="-L$BREW_PREFIX/lib${LDFLAGS:+ $LDFLAGS}"
-    export CPPFLAGS="-I$BREW_PREFIX/include${CPPFLAGS:+ $CPPFLAGS}"
-fi
+# Set up PKG_CONFIG_PATH and other environment variables for modules and native-comp support
+PKG_CONFIG_PATH="${PKG_CONFIG_PATH-}"
+LDFLAGS="${LDFLAGS-}"
+CPPFLAGS="${CPPFLAGS-}"
+GCC_PREFIX=""
+LIBGCCJIT_PREFIX=""
+SQLITE_PREFIX=""
+TREE_SITTER_PREFIX=""
+GCC_VERSION=""
+GCC_LIB_DIR=""
+GCC_CC=""
+NATIVE_COMP_LIBRARY_PATH=""
+RUNTIME_PATH="$(build_runtime_path)"
 
-CONFIGURE_OPTS=(--with-modules --with-native-compilation=aot --with-tree-sitter --enable-mac-self-contained --without-dbus)
+if [[ -n "$BREW_PREFIX" ]]; then
+    GCC_PREFIX="$(brew_formula_prefix gcc)"
+    LIBGCCJIT_PREFIX="$(brew_formula_prefix libgccjit)"
+    SQLITE_PREFIX="$(brew_formula_prefix sqlite)"
+    TREE_SITTER_PREFIX="$(brew_formula_prefix tree-sitter@0.25)"
+    if [[ -z "$TREE_SITTER_PREFIX" ]]; then
+        TREE_SITTER_PREFIX="$(brew_formula_prefix tree-sitter)"
+    fi
+    GCC_VERSION="$(find_gcc_version)"
+
+    PKG_CONFIG_PATH=$(append_colon_path "$PKG_CONFIG_PATH" "$BREW_PREFIX/lib/pkgconfig")
+    PKG_CONFIG_PATH=$(append_colon_path "$PKG_CONFIG_PATH" "$BREW_PREFIX/share/pkgconfig")
+    LDFLAGS=$(append_space_value "$LDFLAGS" "-L$BREW_PREFIX/lib")
+    CPPFLAGS=$(append_space_value "$CPPFLAGS" "-I$BREW_PREFIX/include")
+
+    if [[ -n "$SQLITE_PREFIX" ]]; then
+        LDFLAGS=$(append_space_value "$LDFLAGS" "-L$SQLITE_PREFIX/lib")
+        CPPFLAGS=$(append_space_value "$CPPFLAGS" "-I$SQLITE_PREFIX/include")
+        PKG_CONFIG_PATH=$(append_colon_path "$PKG_CONFIG_PATH" "$SQLITE_PREFIX/lib/pkgconfig")
+    fi
+
+    if [[ -n "$TREE_SITTER_PREFIX" ]]; then
+        LDFLAGS=$(append_space_value "$LDFLAGS" "-L$TREE_SITTER_PREFIX/lib")
+        CPPFLAGS=$(append_space_value "$CPPFLAGS" "-I$TREE_SITTER_PREFIX/include")
+        PKG_CONFIG_PATH=$(append_colon_path "$PKG_CONFIG_PATH" "$TREE_SITTER_PREFIX/lib/pkgconfig")
+    fi
+
+    if [[ -n "$GCC_PREFIX" ]]; then
+        CPPFLAGS=$(append_space_value "$CPPFLAGS" "-I$GCC_PREFIX/include")
+    fi
+
+    if [[ -n "$LIBGCCJIT_PREFIX" ]]; then
+        CPPFLAGS=$(append_space_value "$CPPFLAGS" "-I$LIBGCCJIT_PREFIX/include")
+        PKG_CONFIG_PATH=$(append_colon_path "$PKG_CONFIG_PATH" "$LIBGCCJIT_PREFIX/lib/pkgconfig")
+    fi
+
+    if [[ -n "$GCC_VERSION" ]]; then
+        GCC_CC="$BREW_PREFIX/bin/gcc-$GCC_VERSION"
+        if [[ -d "$BREW_PREFIX/lib/gcc/$GCC_VERSION" ]]; then
+            GCC_LIB_DIR="$BREW_PREFIX/lib/gcc/$GCC_VERSION"
+        elif [[ -d "$BREW_PREFIX/lib/gcc/current" ]]; then
+            GCC_LIB_DIR="$BREW_PREFIX/lib/gcc/current"
+        fi
+    elif [[ -d "$BREW_PREFIX/lib/gcc/current" ]]; then
+        GCC_LIB_DIR="$BREW_PREFIX/lib/gcc/current"
+    fi
+
+    if [[ -n "$GCC_LIB_DIR" ]]; then
+        LDFLAGS=$(append_space_value "$LDFLAGS" "-L$GCC_LIB_DIR")
+        LDFLAGS=$(append_space_value "$LDFLAGS" "-Wl,-rpath,$GCC_LIB_DIR")
+        NATIVE_COMP_LIBRARY_PATH=$(append_colon_path "$NATIVE_COMP_LIBRARY_PATH" "$GCC_LIB_DIR")
+    fi
+
+    EMUTLS_DIR="$(find_emutls_dir "$GCC_PREFIX")"
+    if [[ -n "$EMUTLS_DIR" ]]; then
+        NATIVE_COMP_LIBRARY_PATH=$(append_colon_path "$NATIVE_COMP_LIBRARY_PATH" "$EMUTLS_DIR")
+    fi
+    NATIVE_COMP_LIBRARY_PATH=$(append_colon_path "$NATIVE_COMP_LIBRARY_PATH" "$BREW_PREFIX/lib")
+fi
+export PKG_CONFIG_PATH LDFLAGS CPPFLAGS
+
+CONFIGURE_OPTS=(--with-modules "--with-native-compilation=$NATIVE_COMPILATION" --with-tree-sitter --with-xml2 --with-gnutls --with-rsvg --with-webp --enable-mac-self-contained --without-dbus)
 if [[ $WITH_XWIDGETS -eq 1 ]]; then
     CONFIGURE_OPTS+=(--with-xwidgets)
-fi
-if [[ $WITH_MAC_METAL -eq 1 ]]; then
-    CONFIGURE_OPTS+=(--with-mac-metal)
 fi
 # Ensure we pass the app dir to enable-mac-app
 CONFIGURE_OPTS+=("--enable-mac-app=$APP_DIR")
@@ -432,6 +638,9 @@ echo "  CFLAGS=$CFLAGS"
 echo "  LDFLAGS=$LDFLAGS"
 echo "  CPPFLAGS=$CPPFLAGS"
 echo "  PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+echo "  Runtime PATH=$RUNTIME_PATH"
+[[ -n "$GCC_CC" ]] && echo "  Runtime CC=$GCC_CC"
+[[ -n "$NATIVE_COMP_LIBRARY_PATH" ]] && echo "  Runtime LIBRARY_PATH=$NATIVE_COMP_LIBRARY_PATH"
 echocmd env CFLAGS="$CFLAGS" LDFLAGS="$LDFLAGS" CPPFLAGS="$CPPFLAGS" PKG_CONFIG_PATH="$PKG_CONFIG_PATH" ./configure "${CONFIGURE_OPTS[@]}"
 
 # STEP 2.5: Verify modules support after configure
@@ -543,6 +752,20 @@ if [[ -d "$EMACS_APP" ]]; then
       (setq native-comp-eln-load-path
             (append (butlast native-comp-eln-load-path)
                     (list app-native-lisp))))))
+
+(defconst emacs-mac-build-injected-path
+  (not (null (or (getenv "EMACS_MAC_PATH")
+                 (getenv "EMACS_PLUS_PATH"))))
+  "Non-nil when this build injected a GUI app PATH via Info.plist.")
+
+(let ((emacs-mac-path (or (getenv "EMACS_MAC_PATH")
+                          (getenv "EMACS_PLUS_PATH"))))
+  (when emacs-mac-path
+    (setenv "EMACS_MAC_PATH" emacs-mac-path)
+    (setenv "EMACS_PLUS_PATH" emacs-mac-path)
+    (setq exec-path (append (split-string emacs-mac-path ":" t)
+                            (list exec-directory)))
+    (setenv "PATH" emacs-mac-path)))
 EOF
     else
         echo "+ cat >$SITE_START_FILE <<'EOF' ..."
@@ -550,6 +773,8 @@ EOF
 
     # STEP 5: Icon handling and Info.plist updates (use PlistBuddy commands found in repo)
     PLIST="$EMACS_APP/Contents/Info.plist"
+
+    inject_runtime_environment "$PLIST" "$RUNTIME_PATH" "$GCC_CC" "$NATIVE_COMP_LIBRARY_PATH"
 
     RESOURCES_DIR="$EMACS_APP/Contents/Resources"
 
