@@ -90,6 +90,14 @@ The script will sign the bundle (ad-hoc by default) and remove the =com.apple.qu
 
   Print actions without executing them
 
+- =--with-xwidgets=
+
+  Enable xwidgets (embedded WebKit browser) support
+
+- =--with-native-compilation MODE=
+
+  Native compilation mode: =aot= (default), =yes=, =no=, or =ifavailable=
+
 - =--help=
 
   Show help text
@@ -134,7 +142,7 @@ The script will sign the bundle (ad-hoc by default) and remove the =com.apple.qu
   --icon https://raw.githubusercontent.com/d12frosted/homebrew-emacs-plus/master/icons/emacs-icon-modern.png
 #+END_SRC
 
-The script automatically detects your M1 Max and uses optimized ARM64 build flags.
+
 
 * Icon Handling
 
@@ -215,32 +223,16 @@ For distributed builds intended for other users:
 - You should notarize the build with Apple for full Gatekeeper compatibility
 - The script does not handle notarization (must be done separately)
 
-* Apple Silicon Support
+* Build Flags
 
-The script fully supports Apple Silicon (M1/M2/M3/M4) processors:
-
-** Automatic Architecture Detection
-The script detects your CPU architecture and sets appropriate compiler flags:
-
-- *Apple Silicon (arm64)*: Uses =CFLAGS= with =-mcpu=native -march=native -mtune=native=
-- *Intel (x86_64)*: Uses =CFLAGS= with =-march=native -mtune=native= (excludes =-mcpu=)
-
-** Optimized Build Flags
-The script uses these optimization flags for both architectures:
+** CFLAGS
+The script sets these compiler flags:
 
 #+BEGIN_SRC bash
 -O2                        # Optimization level 2
--march=native -mtune=native # CPU-specific optimizations
--fomit-frame-pointer       # Performance optimization
 -DFD_SETSIZE=10000         # Increase file descriptor limit
 -DDARWIN_UNLIMITED_SELECT  # Remove select() limitations
 #+END_SRC
-
-** Native Compilation
-The script enables:
-- =--with-native-compilation=aot= — Ahead-of-time native compilation for faster Emacs Lisp
-- =--with-mac-metal= — Apple Metal GPU acceleration
-- =--with-tree-sitter= — Modern syntax parsing
 
 ** Parallel Compilation
 The script automatically detects your CPU core count:
@@ -249,13 +241,11 @@ The script automatically detects your CPU core count:
 JOBS=$(sysctl -n hw.ncpu)
 #+END_SRC
 
-On an M1 Max (10 cores), this results in fast parallel compilation.
-
 * Notes and Troubleshooting
 
 ** General Notes
-- The script targets Emacs 30.x and does not patch =configure.ac=
-- Uses source as-is from the repository
+- The script targets Emacs 30.x (mac-port)
+- When =--with-xwidgets= is enabled, the script patches =configure.ac= to fix WebKit SDK header paths
 - Creates =Emacs.app= in the specified =--app-dir= directory
 
 ** Common Issues
@@ -298,18 +288,24 @@ brew install imagemagick
 - On Apple Silicon, native compilation is very fast
 - Consider building with =--dry-run= first to verify your configuration
 
-** Build Flags Reference
-The script configures Emacs with these flags:
+** Configure Flags Reference
+The script always passes these flags:
 
 #+BEGIN_SRC bash
---with-modules                # Dynamic module support
---with-native-compilation=aot # Ahead-of-time native compilation
---with-tree-sitter            # Tree-sitter parsing
---enable-mac-self-contained   # Self-contained app bundle
---with-xwidgets               # Embedded web browser support
---without-dbus                # No D-Bus on macOS
---with-mac-metal              # Metal GPU acceleration
---enable-mac-app=$APP_DIR     # macOS app bundle creation
+--with-modules                          # Dynamic module support
+--with-native-compilation=$MODE         # Native compilation (default: aot)
+--with-tree-sitter                      # Tree-sitter parsing
+--with-xml2 --with-gnutls --with-rsvg   # XML, TLS, SVG support
+--with-webp                             # WebP image support
+--enable-mac-self-contained             # Self-contained app bundle
+--without-dbus                          # No D-Bus on macOS
+--enable-mac-app=$APP_DIR               # macOS app bundle creation
+#+END_SRC
+
+Optional (via script flags):
+
+#+BEGIN_SRC bash
+--with-xwidgets               # Embedded web browser (--with-xwidgets)
 #+END_SRC
 
 * Emacs Client.app (emacsclient wrapper)

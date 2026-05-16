@@ -681,11 +681,7 @@ echocmd make install
 # STEP 3.5: Verify module support in built binary
 echo "Verifying module support in built Emacs..."
 BUILT_EMACS=""
-if [ -f "nextstep/Emacs.app/Contents/MacOS/Emacs" ]; then
-    BUILT_EMACS="nextstep/Emacs.app/Contents/MacOS/Emacs"
-elif [ -f "nextstep/Emacs.app/Contents/MacOS/bin/emacs" ]; then
-    BUILT_EMACS="nextstep/Emacs.app/Contents/MacOS/bin/emacs"
-elif [ -f "$APP_DIR/Emacs.app/Contents/MacOS/Emacs" ]; then
+if [ -f "$APP_DIR/Emacs.app/Contents/MacOS/Emacs" ]; then
     BUILT_EMACS="$APP_DIR/Emacs.app/Contents/MacOS/Emacs"
 elif [ -f "$APP_DIR/Emacs.app/Contents/MacOS/bin/emacs" ]; then
     BUILT_EMACS="$APP_DIR/Emacs.app/Contents/MacOS/bin/emacs"
@@ -713,14 +709,7 @@ fi
 # STEP 4: Post-build packaging / wrapper
 EMACS_APP="${APP_DIR}/Emacs.app"
 if [[ ! -d "$EMACS_APP" ]]; then
-    # Some builds may put Emacs.app under nextstep/Emacs.app or nextstep/ nextstep/Emacs.app
-    if [[ -d "nextstep/Emacs.app" ]]; then
-        echo "Moving nextstep/Emacs.app -> $APP_DIR"
-        echocmd mkdir -p "${APP_DIR}"
-        echocmd cp -a "nextstep/Emacs.app" "$APP_DIR/"
-    else
-        echo "Warning: Emacs.app not found at $EMACS_APP. Build may have failed or app path differs."
-    fi
+    echo "Warning: Emacs.app not found at $EMACS_APP. Build may have failed or app path differs."
 fi
 if [[ -d "$EMACS_APP" ]]; then
     # Align native-comp layout with runtime lookup.  Emacs resolves the
